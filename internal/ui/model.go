@@ -503,7 +503,8 @@ func (m *Model) setStatus(message string, kind statusLevel) {
 
 func (m *Model) viewList() string {
 	helpLines := m.renderHelpLines()
-	bodyHeight := m.height - 2 - 1 - len(helpLines)
+	statusLines := strings.Split(m.renderStatusLine(), "\n")
+	bodyHeight := m.height - 2 - len(statusLines) - len(helpLines)
 	if bodyHeight < 6 {
 		bodyHeight = 6
 	}
@@ -541,7 +542,7 @@ func (m *Model) viewList() string {
 	for len(lines) < 2+bodyHeight {
 		lines = append(lines, "")
 	}
-	lines = append(lines, m.renderStatusLine())
+	lines = append(lines, statusLines...)
 	lines = append(lines, helpLines...)
 	return strings.Join(lines, "\n")
 }
@@ -599,11 +600,13 @@ func (m *Model) viewConfirm() string {
 			"",
 			fmt.Sprintf("App: %s", m.confirm.app.DisplayName()),
 			fmt.Sprintf("Provider: %s", m.confirm.provider.Name),
-			fmt.Sprintf("Endpoint: %s", m.store.EndpointSummary(m.confirm.app, m.confirm.provider)),
+		}
+		body = append(body, providerURLLines(m.store, m.confirm.app, m.confirm.provider, max(24, min(m.width-8, 80)-6))...)
+		body = append(body,
 			"",
 			"This will remove the provider record from the database.",
 			"Press Enter / y to confirm, q / n to go back.",
-		}
+		)
 	} else if canDeleteCurrent {
 		body = []string{
 			dangerStyle.Render(title),
@@ -746,7 +749,30 @@ func (m *Model) renderStatusLine() string {
 	case statusSuccess:
 		prefix = "完成"
 	}
-	return statusBarStyle.Width(max(24, m.width)).Render(prefix + " · " + truncate(text, max(16, m.width-8)))
+	segments := []string{prefix + " · " + strings.ReplaceAll(text, "\n", " ")}
+	segments = append(segments, m.selectedProviderStatusSegments()...)
+	content := strings.Join(segments, " | ")
+	contentWidth := max(16, m.width-4)
+	return statusBarStyle.Width(max(24, m.width)).Render(strings.Join(wrapText(content, contentWidth), "\n"))
+}
+
+func (m *Model) selectedProviderStatusSegments() []string {
+	row := m.selectedRow()
+	if row == nil || row.kind != rowProvider || row.provider == nil {
+		return nil
+	}
+
+	input := m.store.ExtractInput(row.app, *row.provider)
+	baseURL := strings.TrimSpace(input.BaseURL)
+	if baseURL == "" {
+		baseURL = providerBaseURLFallback(row.app)
+	}
+
+	segments := []string{"Base URL: " + baseURL}
+	if website := strings.TrimSpace(input.Website); website != "" {
+		segments = append(segments, "Website: "+website)
+	}
+	return segments
 }
 
 func (m *Model) renderHelpLines() []string {
@@ -994,6 +1020,35 @@ func placeholderFor(app ccswitch.AppType, label string) string {
 	return label
 }
 
+func providerURLLines(store *ccswitch.Store, app ccswitch.AppType, provider ccswitch.Provider, width int) []string {
+	input := store.ExtractInput(app, provider)
+	baseURL := strings.TrimSpace(input.BaseURL)
+	if baseURL == "" {
+		baseURL = providerBaseURLFallback(app)
+	}
+
+	lines := wrapLabelValue("Base URL", baseURL, width)
+	if website := strings.TrimSpace(input.Website); website != "" {
+		lines = append(lines, wrapLabelValue("Website", website, width)...)
+	}
+
+	for index := range lines {
+		lines[index] = mutedStyle.Render(lines[index])
+	}
+	return lines
+}
+
+func providerBaseURLFallback(app ccswitch.AppType) string {
+	switch app {
+	case ccswitch.AppClaude, ccswitch.AppCodex:
+		return "官方登录"
+	case ccswitch.AppGemini:
+		return "Google OAuth"
+	default:
+		return "-"
+	}
+}
+
 func (m *Model) providerColumnWidths(isCurrent bool) (int, int) {
 	total := max(36, m.width-6)
 	statusWidth := 0
@@ -1016,6 +1071,67 @@ func (m *Model) providerColumnWidths(isCurrent bool) (int, int) {
 		endpointWidth = 12
 	}
 	return nameWidth, endpointWidth
+}
+
+func wrapLabelValue(label, value string, width int) []string {
+	prefix := label + ": "
+	if width <= 0 {
+		return nil
+	}
+
+	prefixWidth := lipgloss.Width(prefix)
+	available := width - prefixWidth
+	if available < 8 {
+		lines := []string{truncate(prefix, width)}
+		for _, line := range wrapText(value, max(4, width-2)) {
+			lines = append(lines, "  "+line)
+		}
+		return lines
+	}
+
+	wrapped := wrapText(value, available)
+	if len(wrapped) == 0 {
+		return []string{prefix}
+	}
+
+	lines := []string{prefix + wrapped[0]}
+	indent := strings.Repeat(" ", prefixWidth)
+	for _, line := range wrapped[1:] {
+		lines = append(lines, indent+line)
+	}
+	return lines
+}
+
+func wrapText(input string, width int) []string {
+	if width <= 0 {
+		return nil
+	}
+	if input == "" {
+		return []string{""}
+	}
+
+	lines := make([]string, 0, 1)
+	var builder strings.Builder
+	used := 0
+
+	for _, r := range input {
+		runeWidth := lipgloss.Width(string(r))
+		if runeWidth > width {
+			runeWidth = width
+		}
+		if used+runeWidth > width && builder.Len() > 0 {
+			lines = append(lines, builder.String())
+			builder.Reset()
+			used = 0
+		}
+		builder.WriteRune(r)
+		used += runeWidth
+	}
+
+	if builder.Len() > 0 {
+		lines = append(lines, builder.String())
+	}
+	return lines
 }
 
 func wrapInlineItems(items []string, width int) []string {
