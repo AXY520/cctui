@@ -54,6 +54,41 @@ go build -o cctui .
 ./cctui
 ```
 
+## AUR 自动发布
+
+仓库内置了 GitHub Actions workflow：当你给 GitHub 仓库 push 一个 tag 时，会自动更新 AUR 仓库：
+
+- AUR 仓库地址：`aur@aur.archlinux.org:cctui.git`
+- Workflow 文件：`.github/workflows/publish-aur.yml`
+- 生成脚本：`scripts/update-aur.sh`
+
+### GitHub Secret
+
+你需要在 GitHub 仓库里配置一个 secret：
+
+- `AUR_SSH_PRIVATE_KEY`
+
+它应该对应一个有权限 push 到 `aur@aur.archlinux.org:cctui.git` 的 SSH 私钥。
+
+### 本地测试 AUR 生成
+
+你已经在本地准备了测试仓库 `~/test/cctui`，可以这样测试：
+
+```bash
+./scripts/update-aur.sh \
+  --tag v0.0.0 \
+  --aur-dir ~/test/cctui \
+  --archive-url https://github.com/manateelazycat/cctui/archive/refs/heads/main.tar.gz \
+  --archive-dir-name cctui-main \
+  --validate
+```
+
+这条命令会：
+
+- 生成 `PKGBUILD`
+- 生成 `.SRCINFO`
+- 用 `makepkg --printsrcinfo` 校验 `.SRCINFO` 是否正确
+
 ## 使用方式
 
 启动后会看到按应用分组的供应商列表：

@@ -242,7 +242,7 @@ func (m *Model) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch typed := msg.(type) {
 	case tea.KeyMsg:
 		switch typed.String() {
-		case "q":
+		case "esc":
 			m.mode = modeList
 			m.form = formState{}
 			m.setStatus("已取消编辑", statusInfo)
@@ -637,7 +637,7 @@ func (m *Model) viewConfirm() string {
 
 func (m *Model) renderHeader() string {
 	left := titleStyle.Render("CC Switch TUI") + " " + badgeStyle.Render(m.modeLabel())
-	if m.mode == modeList {
+	if m.mode == modeList || m.mode == modeForm {
 		return left
 	}
 	totalWidth := max(40, m.width)
@@ -758,7 +758,7 @@ func (m *Model) renderHelpLines() []string {
 			help("Tab", "下一项"),
 			help("Shift+Tab", "上一项"),
 			help("Ctrl+S", "保存"),
-			help("q", "返回"),
+			help("Esc", "返回"),
 		}
 	case modeConfirm:
 		if m.confirm != nil && m.current[m.confirm.app] == m.confirm.provider.ID && !m.canDeleteCurrentConfirm() {
