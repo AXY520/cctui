@@ -1,0 +1,126 @@
+# CC Switch TUI
+
+`CC Switch TUI` 是一个终端界面工具，用来管理并切换 `Claude`、`Codex`、`Gemini` 的多套供应商配置。
+
+它适合以下场景：
+
+- 在官方接口、代理接口、公司内网网关之间快速切换
+- 为不同应用分别维护多套 `Base URL`、`API Key`、`Model`
+- 用可视化 TUI 替代手动编辑多个配置文件
+
+## 功能特性
+
+- 支持 `Claude`、`Codex`、`Gemini` 三类应用
+- 使用 SQLite 保存供应商配置，数据默认位于 `~/.cc-switch/`
+- 首次启动时，如果某个应用还没有保存的供应商，会尝试导入当前 live 配置
+- 切换前会先读取当前 live 配置并回写数据库，尽量保留你在外部手动改过的内容
+- 支持新增、编辑、删除、切换供应商
+- `Codex` 额外支持配置 `Reasoning Effort`
+
+## 管理的配置文件
+
+程序会读取并写入这些 live 配置文件：
+
+- `Claude`：`~/.claude/settings.json`
+- `Claude` 兼容旧文件：`~/.claude/claude.json`
+- `Codex`：`~/.codex/auth.json`
+- `Codex`：`~/.codex/config.toml`
+- `Gemini`：`~/.gemini/.env`
+- `Gemini`：`~/.gemini/settings.json`
+
+程序自己的本地数据默认保存在：
+
+- `~/.cc-switch/cc-switch.db`
+- `~/.cc-switch/settings.json`
+
+## 环境要求
+
+- `Go 1.26+`
+- 可以访问对应应用的本地配置目录
+- 终端支持 TUI/Alt Screen
+
+## 构建与运行
+
+### 直接运行
+
+```bash
+go run .
+```
+
+### 构建二进制
+
+```bash
+go build -o cctui .
+./cctui
+```
+
+## 使用方式
+
+启动后会看到按应用分组的供应商列表：
+
+- `Enter`：将当前选中的供应商设为正在使用
+- `a`：新增供应商
+- `e`：编辑供应商
+- `d`：删除供应商
+- `↑/↓` 或 `j/k`：移动光标
+- `1/2/3`：快速跳转到 `Claude` / `Codex` / `Gemini`
+- `g/G`：跳到顶部 / 底部
+- `q`：退出
+
+表单模式下：
+
+- `Tab` / `Shift+Tab`：切换字段
+- `Enter`：下一项，最后一项时保存
+- `Ctrl+S`：保存
+- `q`：取消并返回
+
+## 供应商字段说明
+
+通用字段：
+
+- `名称`：供应商显示名称
+- `Base URL`：接口地址；留空通常表示沿用官方登录或 OAuth 语义
+- `API Key`：接口密钥；留空时会尽量保留登录态语义
+- `Model`：默认模型
+- `Website`：可选，供应商官网
+- `Notes`：可选，备注
+
+`Codex` 独有字段：
+
+- `Reasoning Effort`：例如 `medium`、`high`
+
+## 默认行为
+
+### 首次启动导入
+
+如果某个应用在数据库里还没有供应商，程序会尝试读取该应用当前正在使用的 live 配置，并自动导入一条记录，例如 `Imported Claude`。
+
+### 切换时同步
+
+切换到新供应商前，程序会先尝试读取当前 live 配置，并回写到当前供应商记录中；随后再把目标供应商写入 live 配置文件。
+
+### 删除限制
+
+- 不能直接删除“当前正在使用”的供应商，除非它已经是该应用最后一个供应商
+- 如果删除的是最后一个当前供应商，该应用会变成“未选择”状态
+
+## 高级配置
+
+可以在 `~/.cc-switch/settings.json` 中覆盖默认配置目录：
+
+```json
+{
+  "claudeConfigDir": "/path/to/.claude",
+  "codexConfigDir": "/path/to/.codex",
+  "geminiConfigDir": "/path/to/.gemini"
+}
+```
+
+其中“当前供应商”相关字段也会保存在这个文件里，通常不建议手动修改。
+
+## 适用场景
+
+- 在官方和第三方中转之间快速切换
+- 分离工作环境与个人环境配置
+- 为不同模型服务保留独立的历史配置
+- 用统一入口管理多个 AI CLI / 桌面工具的连接参数

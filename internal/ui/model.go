@@ -75,9 +75,12 @@ type Model struct {
 }
 
 var (
-	titleStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
-	groupStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("69"))
-	currentStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
+	titleStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
+	groupStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("69"))
+	currentStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
+	currentRowStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("42")).
+			Bold(true)
 	selectedStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("230")).
 			Background(lipgloss.Color("63")).
@@ -87,7 +90,7 @@ var (
 	mutedStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 	errorStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true)
 	successStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true)
-	panelStyle      = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("240")).Padding(1, 2)
+	panelStyle      = lipgloss.NewStyle().Border(lipgloss.ASCIIBorder()).BorderForeground(lipgloss.Color("240")).Padding(1, 2)
 	labelStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("69")).Bold(true)
 	badgeStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("62")).Padding(0, 1).Bold(true)
 	headerMetaStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
@@ -98,7 +101,10 @@ var (
 	formHintStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 	panelTitleStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true)
 	dangerStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true)
-	selectedAddStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("33")).Bold(true)
+	selectedAddStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("230")).
+				Background(lipgloss.Color("63")).
+				Bold(true)
 )
 
 func NewModel(store *ccswitch.Store, warnings []string) (*Model, error) {
@@ -327,7 +333,7 @@ func (m *Model) openEditForm(app ccswitch.AppType, provider ccswitch.Provider) {
 func (m *Model) saveForm() (tea.Model, tea.Cmd) {
 	input := m.formInput()
 	if strings.TrimSpace(input.Name) == "" {
-		m.form.errorMessage = "名称不能为空"
+		m.form.errorMessage = "Name is required"
 		return m, nil
 	}
 
@@ -541,9 +547,9 @@ func (m *Model) viewList() string {
 }
 
 func (m *Model) viewForm() string {
-	title := "新增 " + m.form.app.DisplayName() + " 供应商"
+	title := "Add " + m.form.app.DisplayName() + " Provider"
 	if m.form.editMode {
-		title = "编辑 " + m.form.app.DisplayName() + " 供应商"
+		title = "Edit " + m.form.app.DisplayName() + " Provider"
 	}
 
 	lines := []string{
@@ -575,39 +581,39 @@ func (m *Model) viewConfirm() string {
 		return ""
 	}
 
-	title := "确认删除供应商"
+	title := "Delete Provider"
 	canDeleteCurrent := m.canDeleteCurrentConfirm()
 	body := []string{
 		dangerStyle.Render(title),
 		"",
-		fmt.Sprintf("应用: %s", m.confirm.app.DisplayName()),
-		fmt.Sprintf("供应商: %s", m.confirm.provider.Name),
+		fmt.Sprintf("App: %s", m.confirm.app.DisplayName()),
+		fmt.Sprintf("Provider: %s", m.confirm.provider.Name),
 		"",
-		"当前供应商不能删除。",
-		"请先切换到其他供应商后再删除。",
+		"The current provider cannot be deleted.",
+		"Switch to another provider first.",
 	}
 
 	if m.current[m.confirm.app] != m.confirm.provider.ID {
 		body = []string{
 			dangerStyle.Render(title),
 			"",
-			fmt.Sprintf("应用: %s", m.confirm.app.DisplayName()),
-			fmt.Sprintf("供应商: %s", m.confirm.provider.Name),
-			fmt.Sprintf("地址: %s", m.store.EndpointSummary(m.confirm.app, m.confirm.provider)),
+			fmt.Sprintf("App: %s", m.confirm.app.DisplayName()),
+			fmt.Sprintf("Provider: %s", m.confirm.provider.Name),
+			fmt.Sprintf("Endpoint: %s", m.store.EndpointSummary(m.confirm.app, m.confirm.provider)),
 			"",
-			"此操作会删除数据库中的供应商记录。",
-			"按 Enter / y 确认，按 q / n 返回。",
+			"This will remove the provider record from the database.",
+			"Press Enter / y to confirm, q / n to go back.",
 		}
 	} else if canDeleteCurrent {
 		body = []string{
 			dangerStyle.Render(title),
 			"",
-			fmt.Sprintf("应用: %s", m.confirm.app.DisplayName()),
-			fmt.Sprintf("供应商: %s", m.confirm.provider.Name),
+			fmt.Sprintf("App: %s", m.confirm.app.DisplayName()),
+			fmt.Sprintf("Provider: %s", m.confirm.provider.Name),
 			"",
-			"这是该应用最后一个供应商。",
-			"删除后该应用将处于未选择状态。",
-			"按 Enter / y 再次确认删除，按 q / n 返回。",
+			"This is the last provider for the app.",
+			"After deletion, the app will have no active provider.",
+			"Press Enter / y to confirm, q / n to go back.",
 		}
 	}
 
@@ -631,6 +637,9 @@ func (m *Model) viewConfirm() string {
 
 func (m *Model) renderHeader() string {
 	left := titleStyle.Render("CC Switch TUI") + " " + badgeStyle.Render(m.modeLabel())
+	if m.mode == modeList {
+		return left
+	}
 	totalWidth := max(40, m.width)
 	rightText := m.renderHeaderMeta(max(0, totalWidth-lipgloss.Width(left)-1))
 	if rightText == "" {
@@ -655,14 +664,9 @@ func (m *Model) renderHeaderMeta(maxWidth int) string {
 	minimal := make([]string, 0, len(ccswitch.AllAppTypes))
 
 	for _, app := range ccswitch.AllAppTypes {
-		name := m.currentProviderName(app)
-		if name == "" {
-			name = "未选择"
-		}
-
 		shortApp := string([]rune(app.DisplayName())[0])
-		full = append(full, fmt.Sprintf("%s:%s", app.DisplayName(), truncate(name, 14)))
-		compact = append(compact, fmt.Sprintf("%s:%s", shortApp, truncate(name, 8)))
+		full = append(full, fmt.Sprintf("%s:%d", app.DisplayName(), len(m.providers[app])))
+		compact = append(compact, fmt.Sprintf("%s:%d", shortApp, len(m.providers[app])))
 		minimal = append(minimal, fmt.Sprintf("%s:%d", shortApp, len(m.providers[app])))
 	}
 
@@ -684,11 +688,7 @@ func (m *Model) renderHeaderMeta(maxWidth int) string {
 func (m *Model) renderGroupHeading(app ccswitch.AppType) string {
 	label := groupStyle.Render(app.DisplayName())
 	summary := mutedStyle.Render(fmt.Sprintf("%d 个供应商", len(m.providers[app])))
-	currentName := m.currentProviderName(app)
-	if currentName == "" {
-		return label + " " + summary
-	}
-	return label + " " + summary + " · " + currentStyle.Render("当前: "+truncate(currentName, 18))
+	return label + " " + summary
 }
 
 func (m *Model) renderProviderRow(index int, row listRow) string {
@@ -710,14 +710,13 @@ func (m *Model) renderProviderRow(index int, row listRow) string {
 	nameWidth, endpointWidth := m.providerColumnWidths(isCurrent)
 	name := padRight(truncate(row.provider.Name, nameWidth), nameWidth)
 	endpoint := padRight(truncate(m.store.EndpointSummary(row.app, *row.provider), endpointWidth), endpointWidth)
-	status := ""
-	if isCurrent {
-		status = currentStyle.Render("当前")
-	}
 
-	line := strings.TrimRight(fmt.Sprintf("%s%s %s %s %s", prefix, currentMark, name, endpoint, status), " ")
+	line := strings.TrimRight(fmt.Sprintf("%s%s %s %s", prefix, currentMark, name, endpoint), " ")
 	if selected {
 		return selectedStyle.Render(line)
+	}
+	if isCurrent {
+		return currentRowStyle.Render(line)
 	}
 	return line
 }
@@ -787,7 +786,7 @@ func (m *Model) renderHelpLines() []string {
 
 func newFormState(app ccswitch.AppType, provider *ccswitch.Provider, input ccswitch.ProviderInput) formState {
 	labels := []string{
-		"名称",
+		"Name",
 		"Base URL",
 		"API Key",
 		"Model",
@@ -951,46 +950,46 @@ func (m *Model) providerCount(app ccswitch.AppType) int {
 func (m *Model) formHint() string {
 	switch m.form.app {
 	case ccswitch.AppClaude:
-		return "保存后会写入 ~/.claude/settings.json（或兼容 legacy claude.json）"
+		return "Saved to ~/.claude/settings.json (or legacy claude.json)"
 	case ccswitch.AppCodex:
-		return "保存后会写入 ~/.codex/auth.json 与 ~/.codex/config.toml"
+		return "Saved to ~/.codex/auth.json and ~/.codex/config.toml"
 	case ccswitch.AppGemini:
-		return "保存后会写入 ~/.gemini/.env 与 ~/.gemini/settings.json"
+		return "Saved to ~/.gemini/.env and ~/.gemini/settings.json"
 	default:
-		return "保存后会写入对应应用的 live 配置"
+		return "Saved to the app live config"
 	}
 }
 
 func placeholderFor(app ccswitch.AppType, label string) string {
 	switch label {
-	case "名称":
-		return "例如：官方 / 中转 / 公司内网"
+	case "Name":
+		return "e.g. Official / Relay / Company Internal"
 	case "Base URL":
 		switch app {
 		case ccswitch.AppClaude:
-			return "例如：https://api.anthropic.com"
+			return "e.g. https://api.anthropic.com"
 		case ccswitch.AppCodex:
-			return "例如：https://api.openai.com/v1"
+			return "e.g. https://api.openai.com/v1"
 		case ccswitch.AppGemini:
-			return "例如：https://generativelanguage.googleapis.com"
+			return "e.g. https://generativelanguage.googleapis.com"
 		}
 	case "API Key":
-		return "留空表示沿用 OAuth / 登录语义"
+		return "Leave empty to keep OAuth / login semantics"
 	case "Model":
 		switch app {
 		case ccswitch.AppClaude:
-			return "例如：claude-sonnet-4-5"
+			return "e.g. claude-sonnet-4-5"
 		case ccswitch.AppCodex:
-			return "例如：gpt-5-codex"
+			return "e.g. gpt-5-codex"
 		case ccswitch.AppGemini:
-			return "例如：gemini-2.5-pro"
+			return "e.g. gemini-2.5-pro"
 		}
 	case "Reasoning Effort":
-		return "例如：medium / high"
+		return "e.g. medium / high"
 	case "Website":
-		return "可选：供应商官网"
+		return "Optional: provider website"
 	case "Notes":
-		return "可选：备注说明"
+		return "Optional: notes"
 	}
 	return label
 }
