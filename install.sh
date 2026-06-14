@@ -222,7 +222,7 @@ build_from_source() {
     cd "$src_dir"
     export CGO_ENABLED=0
     export GOFLAGS="-buildmode=pie -trimpath -mod=readonly"
-    go build -ldflags='-s -w' -o "${tmpdir}/cctui" . 2>&1
+    go build -ldflags='-s -w -X main.version=${tag}' -o "${tmpdir}/cctui" . 2>&1
   ) || die "编译失败"
   ok "编译完成"
 }

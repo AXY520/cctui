@@ -10,7 +10,14 @@ import (
 	"cctui/internal/ui"
 )
 
+var version = "dev"
+
 func main() {
+	ui.Version = version
+	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
+		fmt.Println("cctui", version)
+		os.Exit(0)
+	}
 	store, err := ccswitch.OpenStore()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "打开数据存储失败: %v\n", err)

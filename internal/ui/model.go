@@ -2,7 +2,9 @@ package ui
 
 import (
 	"fmt"
+	"net/http"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -58,6 +60,16 @@ type confirmState struct {
 	provider ccswitch.Provider
 }
 
+type pingResultMsg struct {
+	providerID string
+	app        ccswitch.AppType
+	latency    time.Duration
+	statusCode int
+	err        error
+}
+
+var Version = "dev"
+
 type Model struct {
 	store       *ccswitch.Store
 	width       int
@@ -72,6 +84,7 @@ type Model struct {
 	status      string
 	statusKind  statusLevel
 	selectedKey string
+	pingStatus  map[string]string
 }
 
 var (
@@ -114,12 +127,13 @@ func NewModel(store *ccswitch.Store, warnings []string) (*Model, error) {
 	}
 
 	model := &Model{
-		store:     store,
-		width:     100,
-		height:    32,
-		mode:      modeList,
-		current:   snapshot.Current,
-		providers: snapshot.Providers,
+		store:       store,
+		width:       100,
+		height:      32,
+		mode:        modeList,
+		current:     snapshot.Current,
+		providers:   snapshot.Providers,
+		pingStatus:  make(map[string]string),
 	}
 	model.rebuildRows()
 	if len(warnings) > 0 {
@@ -140,6 +154,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = typed.Width
 		m.height = typed.Height
+		return m, nil
+	case pingResultMsg:
+		key := typed.app.String() + ":" + typed.providerID
+		if typed.err != nil {
+			m.pingStatus[key] = fmt.Sprintf("✕ %v", typed.err)
+		} else {
+			m.pingStatus[key] = fmt.Sprintf("✓ %dms %d", typed.latency.Milliseconds(), typed.statusCode)
+		}
 		return m, nil
 	}
 
@@ -176,6 +198,11 @@ func (m *Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.moveCursor(-1)
 		case "down", "j":
 			m.moveCursor(1)
+		case "t":
+			row := m.selectedRow()
+			if row != nil && row.kind == rowProvider && row.provider != nil {
+				return m, m.pingProvider(row.app, *row.provider)
+			}
 		case "g":
 			m.moveToEdge(true)
 		case "G":
@@ -496,6 +523,33 @@ func (m *Model) selectedRow() *listRow {
 	return &m.rows[m.cursor]
 }
 
+func (m *Model) pingProvider(app ccswitch.AppType, provider ccswitch.Provider) tea.Cmd {
+	input := m.store.ExtractInput(app, provider)
+	baseURL := strings.TrimSpace(input.BaseURL)
+	if baseURL == "" {
+		switch app {
+		case ccswitch.AppClaude:
+			baseURL = "https://api.anthropic.com"
+		case ccswitch.AppCodex:
+			baseURL = "https://api.openai.com"
+		case ccswitch.AppGemini:
+			baseURL = "https://generativelanguage.googleapis.com"
+		}
+	}
+	providerID := provider.ID
+	return func() tea.Msg {
+		start := time.Now()
+		client := &http.Client{Timeout: 5 * time.Second}
+		resp, err := client.Get(baseURL)
+		elapsed := time.Since(start)
+		if err != nil {
+			return pingResultMsg{providerID: providerID, app: app, err: err}
+		}
+		resp.Body.Close()
+		return pingResultMsg{providerID: providerID, app: app, latency: elapsed, statusCode: resp.StatusCode}
+	}
+}
+
 func (m *Model) setStatus(message string, kind statusLevel) {
 	m.status = message
 	m.statusKind = kind
@@ -639,10 +693,7 @@ func (m *Model) viewConfirm() string {
 }
 
 func (m *Model) renderHeader() string {
-	left := titleStyle.Render("CC Switch TUI") + " " + badgeStyle.Render(m.modeLabel())
-	if m.mode == modeList || m.mode == modeForm {
-		return left
-	}
+	left := titleStyle.Render("cctui "+Version) + " " + badgeStyle.Render(m.modeLabel())
 	totalWidth := max(40, m.width)
 	rightText := m.renderHeaderMeta(max(0, totalWidth-lipgloss.Width(left)-1))
 	if rightText == "" {
@@ -664,19 +715,24 @@ func (m *Model) renderHeaderMeta(maxWidth int) string {
 
 	full := make([]string, 0, len(ccswitch.AllAppTypes))
 	compact := make([]string, 0, len(ccswitch.AllAppTypes))
-	minimal := make([]string, 0, len(ccswitch.AllAppTypes))
 
 	for _, app := range ccswitch.AllAppTypes {
-		shortApp := string([]rune(app.DisplayName())[0])
-		full = append(full, fmt.Sprintf("%s:%d", app.DisplayName(), len(m.providers[app])))
-		compact = append(compact, fmt.Sprintf("%s:%d", shortApp, len(m.providers[app])))
-		minimal = append(minimal, fmt.Sprintf("%s:%d", shortApp, len(m.providers[app])))
+		currentName := "-"
+		if currentID, ok := m.current[app]; ok && currentID != "" {
+			for _, p := range m.providers[app] {
+				if p.ID == currentID {
+					currentName = p.Name
+					break
+				}
+			}
+		}
+		full = append(full, fmt.Sprintf("%s: %s", app.DisplayName(), currentName))
+		compact = append(compact, fmt.Sprintf("%c: %s", []rune(app.DisplayName())[0], currentName))
 	}
 
 	candidates := []string{
 		strings.Join(full, " | "),
 		strings.Join(compact, " | "),
-		strings.Join(minimal, " | "),
 	}
 
 	for _, candidate := range candidates {
@@ -685,12 +741,21 @@ func (m *Model) renderHeaderMeta(maxWidth int) string {
 		}
 	}
 
-	return truncate(strings.Join(minimal, " | "), maxWidth)
+	return truncate(strings.Join(compact, " | "), maxWidth)
 }
 
 func (m *Model) renderGroupHeading(app ccswitch.AppType) string {
 	label := groupStyle.Render(app.DisplayName())
-	summary := mutedStyle.Render(fmt.Sprintf("%d 个供应商", len(m.providers[app])))
+	currentName := ""
+	if currentID, ok := m.current[app]; ok && currentID != "" {
+		for _, p := range m.providers[app] {
+			if p.ID == currentID {
+				currentName = " → " + currentStyle.Render(p.Name)
+				break
+			}
+		}
+	}
+	summary := mutedStyle.Render(fmt.Sprintf("(%d 个供应商", len(m.providers[app]))) + currentName + mutedStyle.Render(")")
 	return label + " " + summary
 }
 
@@ -714,7 +779,13 @@ func (m *Model) renderProviderRow(index int, row listRow) string {
 	name := padRight(truncate(row.provider.Name, nameWidth), nameWidth)
 	endpoint := padRight(truncate(m.store.EndpointSummary(row.app, *row.provider), endpointWidth), endpointWidth)
 
-	line := strings.TrimRight(fmt.Sprintf("%s%s %s %s", prefix, currentMark, name, endpoint), " ")
+	ping := ""
+	pingKey := row.app.String() + ":" + row.provider.ID
+	if ps, ok := m.pingStatus[pingKey]; ok {
+		ping = " " + mutedStyle.Render(ps)
+	}
+
+	line := strings.TrimRight(fmt.Sprintf("%s%s %s %s%s", prefix, currentMark, name, endpoint, ping), " ")
 	if selected {
 		return selectedStyle.Render(line)
 	}
@@ -799,6 +870,7 @@ func (m *Model) renderHelpLines() []string {
 		items = []string{
 			help("↑/↓ j/k", "移动"),
 			help("Enter", "设为当前"),
+			help("t", "测速"),
 			help("a", "添加"),
 			help("e", "编辑"),
 			help("d", "删除"),
