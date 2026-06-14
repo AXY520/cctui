@@ -18,15 +18,9 @@ warn()  { printf "${YELLOW}[WARN]${NC}  %s\n" "$*"; }
 err()   { printf "${RED}[ERR!]${NC}  %s\n" "$*" >&2; }
 die()   { err "$*"; exit 1; }
 
-# 清空终端输入缓冲（滚轮/误触产生的转义序列）
+# 清空终端输入缓冲
 drain_stdin() {
-  if [[ -t 0 ]]; then
-    local saved_stty
-    saved_stty="$(stty -g)"
-    stty -icanon min 0 time 0 2>/dev/null
-    while read -r -t 0.01 _drain 2>/dev/null; do :; done
-    stty "$saved_stty" 2>/dev/null
-  fi
+  while read -r -t 0.1 -n 1000 _drain 2>/dev/null; do :; done
 }
 
 # ── 依赖检查 ─────────────────────────────────────────────────────────
@@ -333,6 +327,7 @@ show_info() {
   elif installed_path="$(find_installed 2>/dev/null)"; then
     installed_ver="已安装(不在 PATH)"
   fi
+  [[ -n "$installed_path" ]] && installed_path="${installed_path:0:31}"
 
   local distro_display="${DISTRO}"
   case "$DISTRO" in
@@ -342,17 +337,16 @@ show_info() {
     suse)   distro_display="openSUSE" ;;
   esac
 
-  printf "\n"
-  printf "  ${BOLD}╔══════════════════════════════════════╗${NC}\n"
-  printf "  ${BOLD}║${NC}         ${CYAN}${BOLD}cctui 安装管理器${NC}             ${BOLD}║${NC}\n"
-  printf "  ${BOLD}╠══════════════════════════════════════╣${NC}\n"
-  printf "  ${BOLD}║${NC}  系统:     ${BOLD}%-24s${NC} ${BOLD}║${NC}\n" "${OS}/${ARCH}"
-  printf "  ${BOLD}║${NC}  发行版:   ${BOLD}%-24s${NC} ${BOLD}║${NC}\n" "${distro_display}"
-  printf "  ${BOLD}║${NC}  已安装:   ${BOLD}%-24s${NC} ${BOLD}║${NC}\n" "${installed_ver}"
-  printf "  ${BOLD}║${NC}  最新版:   ${BOLD}%-24s${NC} ${BOLD}║${NC}\n" "${latest_ver}"
+  printf "\n  ${BOLD}┌──────────────────────────────────────┐${NC}\n"
+  printf "  ${BOLD}│${NC}  ${CYAN}${BOLD}cctui 安装管理器${NC}                   ${BOLD}│${NC}\n"
+  printf "  ${BOLD}├──────────────────────────────────────┤${NC}\n"
+  printf "  ${BOLD}│${NC}  系统:     ${BOLD}%-25s${NC}${BOLD}│${NC}\n" "${OS}/${ARCH}"
+  printf "  ${BOLD}│${NC}  发行版:   ${BOLD}%-25s${NC}${BOLD}│${NC}\n" "${distro_display}"
+  printf "  ${BOLD}│${NC}  已安装:   ${BOLD}%-25s${NC}${BOLD}│${NC}\n" "${installed_ver}"
+  printf "  ${BOLD}│${NC}  最新版:   ${BOLD}%-25s${NC}${BOLD}│${NC}\n" "${latest_ver}"
   [[ -n "$installed_path" ]] && \
-  printf "  ${BOLD}║${NC}  路径:     ${DIM}%-24s${NC} ${BOLD}║${NC}\n" "${installed_path}"
-  printf "  ${BOLD}╚══════════════════════════════════════╝${NC}\n"
+  printf "  ${BOLD}│${NC}  路径:     ${DIM}%-25s${NC}${BOLD}│${NC}\n" "${installed_path}"
+  printf "  ${BOLD}└──────────────────────────────────────┘${NC}\n"
   printf "\n"
 }
 
