@@ -19,7 +19,7 @@ parse_json_tag() {
 }
 
 # ── 参数解析 ─────────────────────────────────────────────────────────
-REPO="${REPO:-manateelazycat/cctui}"
+REPO="${REPO:-AXY520/cctui}"
 VERSION="${VERSION:-}"
 INSTALL_DIR=""
 MIRROR="${MIRROR:-}"
