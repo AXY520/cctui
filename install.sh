@@ -312,6 +312,7 @@ do_install() {
 
 # ── 信息面板 ─────────────────────────────────────────────────────────
 show_info() {
+  local latest_ver="${1:-unknown}"
   local installed_ver="未安装"
   local installed_path=""
   if command -v cctui &>/dev/null; then
@@ -336,7 +337,8 @@ show_info() {
   printf "  ${BOLD}╠══════════════════════════════════════╣${NC}\n"
   printf "  ${BOLD}║${NC}  系统:     ${BOLD}%-24s${NC} ${BOLD}║${NC}\n" "${OS}/${ARCH}"
   printf "  ${BOLD}║${NC}  发行版:   ${BOLD}%-24s${NC} ${BOLD}║${NC}\n" "${distro_display}"
-  printf "  ${BOLD}║${NC}  状态:     ${BOLD}%-24s${NC} ${BOLD}║${NC}\n" "${installed_ver}"
+  printf "  ${BOLD}║${NC}  已安装:   ${BOLD}%-24s${NC} ${BOLD}║${NC}\n" "${installed_ver}"
+  printf "  ${BOLD}║${NC}  最新版:   ${BOLD}%-24s${NC} ${BOLD}║${NC}\n" "${latest_ver}"
   [[ -n "$installed_path" ]] && \
   printf "  ${BOLD}║${NC}  路径:     ${DIM}%-24s${NC} ${BOLD}║${NC}\n" "${installed_path}"
   printf "  ${BOLD}╚══════════════════════════════════════╝${NC}\n"
@@ -349,20 +351,20 @@ main() {
   require_cmd uname
 
   detect_os
-  show_info
 
   local latest_version
-  info "正在查询最新版本..."
   latest_version="$(get_latest_version)"
+  [[ -z "$latest_version" ]] && latest_version="无法获取"
 
-  if [[ -z "$latest_version" ]]; then
+  show_info "$latest_version"
+
+  if [[ "$latest_version" == "无法获取" ]]; then
     warn "无法获取最新版本，源码编译模式需要网络"
     printf "\n"
     printf "  ${BOLD}[1]${NC} 从源码编译安装 (需要 Go 1.21+)\n"
     printf "  ${BOLD}[2]${NC} 卸载 cctui\n"
     printf "  ${BOLD}[0]${NC} 退出\n"
   else
-    info "最新版本: ${BOLD}${latest_version}${NC}"
     printf "\n"
     printf "  ${BOLD}[1]${NC} 安装 / 升级到 ${latest_version}\n"
     printf "  ${BOLD}[2]${NC} 卸载 cctui\n"
