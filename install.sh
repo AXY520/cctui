@@ -18,6 +18,17 @@ warn()  { printf "${YELLOW}[WARN]${NC}  %s\n" "$*"; }
 err()   { printf "${RED}[ERR!]${NC}  %s\n" "$*" >&2; }
 die()   { err "$*"; exit 1; }
 
+# 清空终端输入缓冲（滚轮/误触产生的转义序列）
+drain_stdin() {
+  if [[ -t 0 ]]; then
+    local saved_stty
+    saved_stty="$(stty -g)"
+    stty -icanon min 0 time 0 2>/dev/null
+    while read -r -t 0.01 _drain 2>/dev/null; do :; done
+    stty "$saved_stty" 2>/dev/null
+  fi
+}
+
 # ── 依赖检查 ─────────────────────────────────────────────────────────
 require_cmd() {
   command -v "$1" &>/dev/null || die "缺少依赖: $1。请先安装后重试。"
@@ -105,6 +116,7 @@ do_uninstall() {
   fi
 
   info "找到 cctui: ${target}"
+  drain_stdin
   printf "确认卸载？[Y/n] "
   read -r reply </dev/tty 2>/dev/null || reply="y"
   case "$reply" in
@@ -282,6 +294,7 @@ do_install() {
     install_binary "${tmpdir}/cctui"
   else
     warn "预编译二进制不可用 (系统: ${OS}/${ARCH})"
+    drain_stdin
     printf "是否从源码编译？需要 ${BOLD}Go 1.21+${NC} 和 ${BOLD}git${NC} [y/N] "
     local reply
     if ! read -r reply </dev/tty 2>/dev/null; then
@@ -356,6 +369,7 @@ main() {
     printf "  ${BOLD}[0]${NC} 退出\n"
   fi
 
+  drain_stdin
   printf "\n请选择操作 [0-2]: "
   local choice
   if ! read -r choice </dev/tty 2>/dev/null; then
@@ -386,8 +400,11 @@ main() {
       ;;
   esac
 
-  printf "\n${GREEN}${BOLD}🎉 完成！${NC}\n"
-  printf "运行 ${CYAN}cctui${NC} 启动 TUI 界面\n"
+  local action_result="done"
+  printf "\n${GREEN}${BOLD}\U0001f389 完成！${NC}\n"
+  if command -v cctui &>/dev/null; then
+    printf "运行 ${CYAN}cctui${NC} 启动 TUI 界面\n"
+  fi
   printf "文档: https://github.com/%s\n" "$REPO"
 }
 
