@@ -128,29 +128,41 @@ do_uninstall() {
   info "配置数据 ~/.cc-switch/ 未删除，如需清理请执行: rm -rf ~/.cc-switch"
 }
 
-# ── GitHub 请求 ──────────────────────────────────────────────────────
-REPO="${REPO:-AXY520/cctui}"
+# ── 平台自适应请求 ───────────────────────────────────────────────────
+REPO="${REPO:-aixinyin/cctui}"
 MIRROR="${MIRROR:-}"
 VERSION=""
 
-github_api() {
-  curl -fsSL -H "Accept: application/vnd.github.v3+json" \
-    "https://api.github.com${1}" 2>/dev/null
+# 根据 repo 路径自动判断平台（gitee / github）
+REPO_HOST="gitee.com"
+[[ "$REPO" == *"/"* ]] || true
+if [[ -n "$MIRROR" ]]; then
+  BASE_URL="${MIRROR}/https://${REPO_HOST}"
+else
+  BASE_URL="https://${REPO_HOST}"
+fi
+
+repo_api() {
+  if [[ "$REPO_HOST" == "gitee.com" ]]; then
+    curl -fsSL "https://${REPO_HOST}/api/v5/repos/${REPO}${1}" 2>/dev/null
+  else
+    curl -fsSL -H "Accept: application/vnd.github.v3+json" \
+      "https://api.github.com${1}" 2>/dev/null
+  fi
 }
 
-github_download() {
+repo_download() {
   local path="$1" output="$2"
-  local url="https://github.com${path}"
-  [[ -n "$MIRROR" ]] && url="${MIRROR}/${url}"
+  local url="${BASE_URL}/${REPO}${path}"
   curl -fSL --progress-bar -o "$output" "$url"
 }
 
 # ── 获取最新版本 ─────────────────────────────────────────────────────
 get_latest_version() {
   local ver
-  ver="$(github_api "/repos/${REPO}/releases/latest" | parse_json_tag "tag_name" || true)"
+  ver="$(repo_api "/releases/latest" | parse_json_tag "tag_name" || true)"
   if [[ -z "$ver" ]]; then
-    ver="$(github_api "/repos/${REPO}/tags?per_page=1" | parse_json_tag "name" || true)"
+    ver="$(repo_api "/tags?page=1&per_page=1" | parse_json_tag "name" || true)"
   fi
   echo "$ver"
 }
@@ -160,10 +172,9 @@ download_binary() {
   local tag="$1" tmpdir="$2"
   local archive_name="cctui-${OS}-${ARCH}.tar.gz"
   local dest="${tmpdir}/${archive_name}"
-  local download_path="/${REPO}/releases/download/${tag}/${archive_name}"
 
   info "正在下载: ${archive_name}"
-  if github_download "$download_path" "$dest"; then
+  if repo_download "/releases/download/${tag}/${archive_name}" "$dest"; then
     tar xzf "$dest" -C "$tmpdir" 2>/dev/null || return 1
     local found
     found="$(find "$tmpdir" -name 'cctui' -type f | head -n1)"
@@ -196,11 +207,11 @@ build_from_source() {
 
   if [[ "$tag" == "main" ]]; then
     info "正在克隆仓库..."
-    git clone --depth 1 "https://github.com/${REPO}.git" "$src_dir" 2>/dev/null \
+    git clone --depth 1 "https://${REPO_HOST}/${REPO}.git" "$src_dir" 2>/dev/null \
       || die "克隆失败，请检查网络"
   else
     info "正在下载源码..."
-    local tar_url="https://github.com/${REPO}/archive/refs/tags/${tag}.tar.gz"
+    local tar_url="https://${REPO_HOST}/${REPO}/archive/refs/tags/${tag}.tar.gz"
     [[ -n "$MIRROR" ]] && tar_url="${MIRROR}/${tar_url}"
     curl -fSL --progress-bar -o "${tmpdir}/src.tar.gz" "$tar_url" || die "源码下载失败"
     tar xzf "${tmpdir}/src.tar.gz" -C "$src_dir" --strip-components=1
@@ -407,7 +418,7 @@ main() {
   if command -v cctui &>/dev/null; then
     printf "运行 ${CYAN}cctui${NC} 启动 TUI 界面\n"
   fi
-  printf "文档: https://github.com/%s\n" "$REPO"
+  printf "文档: https://${REPO_HOST}/%s\n" "$REPO"
 }
 
 # ── 支持命令行参数覆盖（跳过菜单）──────────────────────────────────
@@ -435,8 +446,8 @@ cctui 安装脚本
   bash install.sh -u         # 直接卸载
 
 环境变量:
-  REPO    覆盖仓库地址 (默认 AXY520/cctui)
-  MIRROR  GitHub 镜像前缀，例如 https://ghfast.top
+  REPO    覆盖仓库地址 (默认 aixinyin/cctui)
+  MIRROR  镜像前缀，例如 https://ghfast.top
 
 示例:
   bash install.sh                           # 菜单模式
