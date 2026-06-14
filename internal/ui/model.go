@@ -1,7 +1,9 @@
 package ui
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -19,6 +21,7 @@ const (
 	modeList screenMode = iota
 	modeForm
 	modeConfirm
+	modeModelPicker
 )
 
 type rowKind int
@@ -46,18 +49,31 @@ type listRow struct {
 }
 
 type formState struct {
-	app          ccswitch.AppType
-	editMode     bool
-	original     *ccswitch.Provider
-	fields       []textinput.Model
-	labels       []string
-	focusIndex   int
-	errorMessage string
+	app             ccswitch.AppType
+	editMode        bool
+	original        *ccswitch.Provider
+	fields          []textinput.Model
+	labels          []string
+	focusIndex      int
+	errorMessage    string
+	modelFieldIndex int
+}
+
+type modelPickerState struct {
+	app    ccswitch.AppType
+	models []string
+	cursor int
 }
 
 type confirmState struct {
 	app      ccswitch.AppType
 	provider ccswitch.Provider
+}
+
+type modelFetchResultMsg struct {
+	app    ccswitch.AppType
+	models []string
+	err    error
 }
 
 type pingResultMsg struct {
@@ -81,6 +97,7 @@ type Model struct {
 	providers   map[ccswitch.AppType][]ccswitch.Provider
 	form        formState
 	confirm     *confirmState
+	modelPicker *modelPickerState
 	status      string
 	statusKind  statusLevel
 	selectedKey string
@@ -127,13 +144,13 @@ func NewModel(store *ccswitch.Store, warnings []string) (*Model, error) {
 	}
 
 	model := &Model{
-		store:       store,
-		width:       100,
-		height:      32,
-		mode:        modeList,
-		current:     snapshot.Current,
-		providers:   snapshot.Providers,
-		pingStatus:  make(map[string]string),
+		store:      store,
+		width:      100,
+		height:     32,
+		mode:       modeList,
+		current:    snapshot.Current,
+		providers:  snapshot.Providers,
+		pingStatus: make(map[string]string),
 	}
 	model.rebuildRows()
 	if len(warnings) > 0 {
@@ -155,6 +172,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = typed.Width
 		m.height = typed.Height
 		return m, nil
+	case modelFetchResultMsg:
+		if typed.err != nil {
+			m.form.errorMessage = fmt.Sprintf("获取模型失败: %v", typed.err)
+		} else if len(typed.models) == 0 {
+			m.form.errorMessage = "未获取到模型"
+		} else {
+			m.modelPicker = &modelPickerState{
+				app:    typed.app,
+				models: typed.models,
+			}
+			m.mode = modeModelPicker
+			m.form.errorMessage = ""
+		}
+		return m, nil
 	case pingResultMsg:
 		key := typed.app.String() + ":" + typed.providerID
 		if typed.err != nil {
@@ -172,6 +203,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateForm(msg)
 	case modeConfirm:
 		return m.updateConfirm(msg)
+	case modeModelPicker:
+		return m.updateModelPicker(msg)
 	default:
 		return m, nil
 	}
@@ -183,6 +216,8 @@ func (m *Model) View() string {
 		return m.viewForm()
 	case modeConfirm:
 		return m.viewConfirm()
+	case modeModelPicker:
+		return m.viewModelPicker()
 	default:
 		return m.viewList()
 	}
@@ -294,6 +329,11 @@ func (m *Model) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "ctrl+s":
 			return m.saveForm()
+		case "ctrl+f":
+			if m.form.focusIndex == m.form.modelFieldIndex {
+				m.form.errorMessage = "正在获取模型列表..."
+				return m, m.fetchModels()
+			}
 		}
 	}
 
@@ -345,6 +385,145 @@ func (m *Model) updateConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m *Model) updateModelPicker(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch typed := msg.(type) {
+	case tea.KeyMsg:
+		switch typed.String() {
+		case "esc", "q":
+			m.mode = modeForm
+			m.modelPicker = nil
+			return m, nil
+		case "up", "k":
+			if m.modelPicker != nil && m.modelPicker.cursor > 0 {
+				m.modelPicker.cursor--
+			}
+		case "down", "j":
+			if m.modelPicker != nil && m.modelPicker.cursor < len(m.modelPicker.models)-1 {
+				m.modelPicker.cursor++
+			}
+		case "enter":
+			if m.modelPicker != nil && len(m.modelPicker.models) > 0 {
+				selected := m.modelPicker.models[m.modelPicker.cursor]
+				m.form.fields[m.form.modelFieldIndex].SetValue(selected)
+				m.mode = modeForm
+				m.modelPicker = nil
+				m.form.focusIndex++
+				m.syncFormFocus()
+			}
+			return m, nil
+		}
+	}
+	return m, nil
+}
+
+func (m *Model) fetchModels() tea.Cmd {
+	app := m.form.app
+	baseURL := strings.TrimSpace(m.form.fields[1].Value())
+	apiKey := strings.TrimSpace(m.form.fields[2].Value())
+
+	if baseURL == "" {
+		switch app {
+		case ccswitch.AppClaude:
+			baseURL = "https://api.anthropic.com"
+		case ccswitch.AppCodex:
+			baseURL = "https://api.openai.com"
+		case ccswitch.AppGemini:
+			baseURL = "https://generativelanguage.googleapis.com"
+		}
+	}
+
+	if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
+		baseURL = "https://" + baseURL
+	}
+	baseURL = strings.TrimRight(baseURL, "/")
+
+	return func() tea.Msg {
+		var url string
+		var req *http.Request
+		var err error
+
+		switch app {
+		case ccswitch.AppGemini:
+			url = baseURL + "/v1beta/models"
+			req, err = http.NewRequest("GET", url, nil)
+			if err == nil {
+				if apiKey != "" {
+					req.Header.Set("x-goog-api-key", apiKey)
+				}
+			}
+		default:
+			url = baseURL + "/v1/models"
+			req, err = http.NewRequest("GET", url, nil)
+			if err == nil {
+				if apiKey != "" {
+					if app == ccswitch.AppClaude {
+						req.Header.Set("x-api-key", apiKey)
+						req.Header.Set("anthropic-version", "2023-06-01")
+					} else {
+						req.Header.Set("Authorization", "Bearer "+apiKey)
+					}
+				}
+			}
+		}
+
+		if err != nil {
+			return modelFetchResultMsg{app: app, err: err}
+		}
+
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			return modelFetchResultMsg{app: app, err: err}
+		}
+		defer resp.Body.Close()
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return modelFetchResultMsg{app: app, err: err}
+		}
+
+		if resp.StatusCode != 200 {
+			return modelFetchResultMsg{app: app, err: fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(body), 100))}
+		}
+
+		var models []string
+
+		switch app {
+		case ccswitch.AppGemini:
+			var result struct {
+				Models []struct {
+					Name string `json:"name"`
+				} `json:"models"`
+			}
+			if err := json.Unmarshal(body, &result); err != nil {
+				return modelFetchResultMsg{app: app, err: err}
+			}
+			for _, m := range result.Models {
+				name := strings.TrimPrefix(m.Name, "models/")
+				models = append(models, name)
+			}
+		default:
+			var result struct {
+				Data []struct {
+					ID string `json:"id"`
+				} `json:"data"`
+			}
+			if err := json.Unmarshal(body, &result); err != nil {
+				return modelFetchResultMsg{app: app, err: err}
+			}
+			for _, m := range result.Data {
+				models = append(models, m.ID)
+			}
+		}
+
+		if len(models) == 0 {
+			return modelFetchResultMsg{app: app, err: fmt.Errorf("API 返回了空的模型列表")}
+		}
+
+		return modelFetchResultMsg{app: app, models: models}
+	}
 }
 
 func (m *Model) openAddForm(app ccswitch.AppType) {
@@ -601,6 +780,44 @@ func (m *Model) viewList() string {
 	return strings.Join(lines, "\n")
 }
 
+func (m *Model) viewModelPicker() string {
+	if m.modelPicker == nil {
+		return ""
+	}
+
+	title := fmt.Sprintf("选择 %s 模型", m.modelPicker.app.DisplayName())
+	lines := []string{panelTitleStyle.Render(title), ""}
+
+	bodyHeight := max(6, m.height-8)
+	start := 0
+	if m.modelPicker.cursor >= bodyHeight {
+		start = m.modelPicker.cursor - bodyHeight + 1
+	}
+
+	for i := start; i < len(m.modelPicker.models) && i < start+bodyHeight; i++ {
+		model := m.modelPicker.models[i]
+		prefix := "  "
+		if i == m.modelPicker.cursor {
+			prefix = "▶ "
+			lines = append(lines, selectedStyle.Render(prefix+model))
+		} else {
+			lines = append(lines, prefix+model)
+		}
+	}
+
+	lines = append(lines, "")
+	lines = append(lines, formHintStyle.Render("↑/↓ 移动  Enter 选择  Esc 取消"))
+
+	panelLines := strings.Split(panelStyle.Width(max(50, min(m.width-4, 80))).Render(strings.Join(lines, "\n")), "\n")
+	page := []string{m.renderHeader()}
+	topPad := max(1, (m.height-len(panelLines)-2)/2)
+	for i := 0; i < topPad; i++ {
+		page = append(page, "")
+	}
+	page = append(page, panelLines...)
+	return strings.Join(page, "\n")
+}
+
 func (m *Model) viewForm() string {
 	title := "Add " + m.form.app.DisplayName() + " Provider"
 	if m.form.editMode {
@@ -854,6 +1071,7 @@ func (m *Model) renderHelpLines() []string {
 			help("Enter", "下一项/保存"),
 			help("Tab", "下一项"),
 			help("Shift+Tab", "上一项"),
+			help("Ctrl+F", "获取模型"),
 			help("Ctrl+S", "保存"),
 			help("Esc", "返回"),
 		}
@@ -916,12 +1134,13 @@ func newFormState(app ccswitch.AppType, provider *ccswitch.Provider, input ccswi
 	}
 
 	state := formState{
-		app:        app,
-		editMode:   provider != nil,
-		original:   provider,
-		fields:     fields,
-		labels:     labels,
-		focusIndex: 0,
+		app:             app,
+		editMode:        provider != nil,
+		original:        provider,
+		modelFieldIndex: 3,
+		fields:          fields,
+		labels:          labels,
+		focusIndex:      0,
 	}
 	state.syncFocus()
 	return state
