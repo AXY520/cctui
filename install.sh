@@ -412,7 +412,6 @@ main() {
   if command -v cctui &>/dev/null; then
     printf "运行 ${CYAN}cctui${NC} 启动 TUI 界面\n"
   fi
-  printf "文档: https://${REPO_HOST}/%s\n" "$REPO"
 }
 
 # ── 支持命令行参数覆盖（跳过菜单）──────────────────────────────────
