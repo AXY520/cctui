@@ -439,53 +439,66 @@ func (m *Model) fetchModels() tea.Cmd {
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
 
-	return func() tea.Msg {
-		var url string
-		var req *http.Request
-		var err error
+	modelsBaseURL := strings.TrimSuffix(baseURL, "/v1")
 
-		switch app {
-		case ccswitch.AppGemini:
-			url = baseURL + "/v1beta/models"
-			req, err = http.NewRequest("GET", url, nil)
-			if err == nil {
-				if apiKey != "" {
-					req.Header.Set("x-goog-api-key", apiKey)
-				}
+	return func() tea.Msg {
+		buildRequest := func(url string) (*http.Request, error) {
+			req, err := http.NewRequest("GET", url, nil)
+			if err != nil || apiKey == "" {
+				return req, err
 			}
-		default:
-			url = baseURL + "/v1/models"
-			req, err = http.NewRequest("GET", url, nil)
-			if err == nil {
-				if apiKey != "" {
-					if app == ccswitch.AppClaude {
-						req.Header.Set("x-api-key", apiKey)
-						req.Header.Set("anthropic-version", "2023-06-01")
-					} else {
-						req.Header.Set("Authorization", "Bearer "+apiKey)
-					}
-				}
+			switch app {
+			case ccswitch.AppGemini:
+				req.Header.Set("x-goog-api-key", apiKey)
+			case ccswitch.AppClaude:
+				req.Header.Set("x-api-key", apiKey)
+				req.Header.Set("anthropic-version", "2023-06-01")
+			default:
+				req.Header.Set("Authorization", "Bearer "+apiKey)
 			}
+			return req, nil
 		}
 
-		if err != nil {
-			return modelFetchResultMsg{app: app, err: err}
+		var urls []string
+		if app == ccswitch.AppGemini {
+			urls = []string{baseURL + "/v1beta/models"}
+		} else {
+			urls = []string{
+				modelsBaseURL + "/v1/models",
+				modelsBaseURL + "/models",
+			}
 		}
 
 		client := &http.Client{Timeout: 10 * time.Second}
-		resp, err := client.Do(req)
-		if err != nil {
-			return modelFetchResultMsg{app: app, err: err}
-		}
-		defer resp.Body.Close()
+		var body []byte
+		var lastErr error
+		for _, url := range urls {
+			req, err := buildRequest(url)
+			if err != nil {
+				return modelFetchResultMsg{app: app, err: err}
+			}
 
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return modelFetchResultMsg{app: app, err: err}
+			resp, err := client.Do(req)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+
+			body, err = io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			if resp.StatusCode == 200 {
+				lastErr = nil
+				break
+			}
+			lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(body), 100))
 		}
 
-		if resp.StatusCode != 200 {
-			return modelFetchResultMsg{app: app, err: fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(body), 100))}
+		if lastErr != nil {
+			return modelFetchResultMsg{app: app, err: lastErr}
 		}
 
 		var models []string
