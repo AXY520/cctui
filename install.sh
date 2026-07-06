@@ -19,6 +19,17 @@ die()   { err "$*"; exit 1; }
 
 require_cmd() { command -v "$1" &>/dev/null || die "缺少依赖: $1。请先安装后重试。"; }
 
+# 是否有可交互的终端可读取输入 (真正尝试打开, 避免 setsid/容器下 /dev/tty 存在却打不开)
+has_tty() { { : </dev/tty; } 2>/dev/null; }
+
+# 从终端读取一行输入; 无 tty 时返回失败, 由调用方决定默认行为
+read_tty() {
+  local __var="$1"; local __reply=""
+  has_tty || return 1
+  read -r __reply </dev/tty 2>/dev/null || return 1
+  printf -v "$__var" '%s' "$__reply"
+}
+
 REPO="${REPO:-aixinyin/cctui}"
 MIRROR="${MIRROR:-}"
 REPO_HOST="gitee.com"
@@ -59,7 +70,7 @@ installed_version() {
 do_uninstall() {
   local target
   target="$(find_cctui 2>/dev/null)" || { warn "未找到已安装的 cctui"; return 0; }
-  printf "确认卸载？[Y/n] "; local reply; read -r reply </dev/tty; reply="${reply:-y}"
+  printf "确认卸载？[Y/n] "; local reply=""; read_tty reply || true; reply="${reply:-y}"; printf "\n"
   case "$reply" in [nN]*) info "已取消"; return 0;; esac
   rm -f "$target" "${target}.bak"
   ok "已卸载 cctui"
@@ -213,14 +224,11 @@ main() {
   local installed="n"
   find_cctui &>/dev/null && installed="y"
 
-  [[ "$installed" == "y" && "$has_update" == "y" ]] && opts+=("升级")
-  [[ "$installed" == "n" ]] && opts+=("安装")
-
-  if [[ -n "$iv" ]]; then
-    if [[ "$has_update" == "y" ]]; then
-      opts+=("重新安装")
-    fi
-    opts+=("卸载")
+  if [[ "$installed" == "y" ]]; then
+    [[ "$has_update" == "y" ]] && opts+=("升级")
+    opts+=("重新安装" "卸载")
+  else
+    opts+=("安装")
   fi
   opts+=("退出")
 
@@ -233,7 +241,16 @@ main() {
   done
   printf "\n请选择操作 [1-%d]: " "${#opts[@]}"
 
-  local choice; read -r choice </dev/tty
+  # 无可交互终端时(如 curl|bash 且无 tty), 默认执行第 1 项而不是卡住/报错
+  local choice=""
+  if ! read_tty choice; then
+    choice=1
+    printf "1\n"
+    if ! has_tty; then
+      warn "未检测到交互终端, 默认执行: ${opts[0]}"
+      info "如需指定操作可用: bash install.sh -i <版本>  或  -u 卸载"
+    fi
+  fi
   choice="${choice:-1}"
 
   # 如果没指定安装参数，默认就当前最新版本
