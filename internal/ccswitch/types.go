@@ -8,12 +8,17 @@ import (
 type AppType string
 
 const (
+	AppGlobal AppType = "global"
 	AppClaude AppType = "claude"
 	AppCodex  AppType = "codex"
 	AppGemini AppType = "gemini"
 )
 
+// AllAppTypes 是会读写 live 配置的应用。
 var AllAppTypes = []AppType{AppClaude, AppCodex, AppGemini}
+
+// UIAppTypes 是 TUI 列表展示顺序，全局供应商置顶。
+var UIAppTypes = []AppType{AppGlobal, AppClaude, AppCodex, AppGemini}
 
 func (a AppType) String() string {
 	return string(a)
@@ -21,6 +26,8 @@ func (a AppType) String() string {
 
 func (a AppType) DisplayName() string {
 	switch a {
+	case AppGlobal:
+		return "全局"
 	case AppClaude:
 		return "Claude"
 	case AppCodex:
@@ -29,6 +36,16 @@ func (a AppType) DisplayName() string {
 		return "Gemini"
 	default:
 		return strings.Title(string(a))
+	}
+}
+
+// IsLiveApp 表示该类型会读写本地 CLI live 配置。
+func (a AppType) IsLiveApp() bool {
+	switch a {
+	case AppClaude, AppCodex, AppGemini:
+		return true
+	default:
+		return false
 	}
 }
 

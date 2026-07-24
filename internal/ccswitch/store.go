@@ -94,17 +94,20 @@ func (s *Store) Bootstrap() ([]string, error) {
 
 func (s *Store) Snapshot() (*Snapshot, error) {
 	out := &Snapshot{
-		Providers: make(map[AppType][]Provider, len(AllAppTypes)),
+		Providers: make(map[AppType][]Provider, len(UIAppTypes)),
 		Current:   make(map[AppType]string, len(AllAppTypes)),
 	}
 
-	for _, app := range AllAppTypes {
+	for _, app := range UIAppTypes {
 		providers, err := s.ListProviders(app)
 		if err != nil {
 			return nil, err
 		}
 		out.Providers[app] = providers
 
+		if !app.IsLiveApp() {
+			continue
+		}
 		current, err := s.GetEffectiveCurrentProvider(app)
 		if err != nil {
 			return nil, err
@@ -243,6 +246,46 @@ func (s *Store) GetProvider(app AppType, id string) (*Provider, error) {
 }
 
 func (s *Store) AddProvider(app AppType, input ProviderInput) (*Provider, bool, error) {
+	if app == AppGlobal {
+		provider, err := s.AddGlobalProvider(input)
+		return provider, false, err
+	}
+	return s.addProvider(app, input, true, nil)
+}
+
+// AddGlobalProvider 新增全局供应商，并同步复制到 Claude/Codex/Gemini。
+// 同步出来的 CLI 供应商不会自动切换，需用户在对应分组中手动启用。
+func (s *Store) AddGlobalProvider(input ProviderInput) (*Provider, error) {
+	global, _, err := s.addProvider(AppGlobal, input, false, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	linked := map[string]string{}
+	for _, app := range AllAppTypes {
+		meta := map[string]any{
+			"global_id":   global.ID,
+			"from_global": true,
+		}
+		child, _, err := s.addProvider(app, input, false, meta)
+		if err != nil {
+			return nil, fmt.Errorf("同步到 %s 失败: %w", app.DisplayName(), err)
+		}
+		linked[app.String()] = child.ID
+	}
+
+	if global.Meta == nil {
+		global.Meta = map[string]any{}
+	}
+	global.Meta["linked"] = linked
+	global.Meta["from_global"] = true
+	if err := s.saveProviderRow(AppGlobal, *global); err != nil {
+		return nil, err
+	}
+	return global, nil
+}
+
+func (s *Store) addProvider(app AppType, input ProviderInput, autoSwitch bool, meta map[string]any) (*Provider, bool, error) {
 	providers, err := s.ListProviders(app)
 	if err != nil {
 		return nil, false, err
@@ -258,30 +301,97 @@ func (s *Store) AddProvider(app AppType, input ProviderInput) (*Provider, bool, 
 	sortIndex := nextSortIndex(providers)
 	provider.CreatedAt = &now
 	provider.SortIndex = &sortIndex
+	if meta != nil {
+		if provider.Meta == nil {
+			provider.Meta = map[string]any{}
+		}
+		for key, value := range meta {
+			provider.Meta[key] = value
+		}
+	}
 
 	if err := s.saveProviderRow(app, provider); err != nil {
 		return nil, false, err
 	}
 
 	autoSwitched := false
-	current, err := s.GetEffectiveCurrentProvider(app)
-	if err != nil {
-		return nil, false, err
-	}
-	if current == "" {
-		if err := s.writeLiveSettings(app, provider); err != nil {
+	if autoSwitch && app.IsLiveApp() {
+		current, err := s.GetEffectiveCurrentProvider(app)
+		if err != nil {
 			return nil, false, err
 		}
-		if err := s.setCurrentProvider(app, provider.ID); err != nil {
-			return nil, false, err
+		if current == "" {
+			if err := s.writeLiveSettings(app, provider); err != nil {
+				return nil, false, err
+			}
+			if err := s.setCurrentProvider(app, provider.ID); err != nil {
+				return nil, false, err
+			}
+			autoSwitched = true
 		}
-		autoSwitched = true
 	}
 
 	return &provider, autoSwitched, nil
 }
 
 func (s *Store) UpdateProvider(app AppType, existing Provider, input ProviderInput) (*Provider, error) {
+	if app == AppGlobal {
+		return s.UpdateGlobalProvider(existing, input)
+	}
+	return s.updateProvider(app, existing, input)
+}
+
+// UpdateGlobalProvider 更新全局供应商，并同步到各 CLI 中由它生成的副本。
+func (s *Store) UpdateGlobalProvider(existing Provider, input ProviderInput) (*Provider, error) {
+	global, err := s.updateProvider(AppGlobal, existing, input)
+	if err != nil {
+		return nil, err
+	}
+
+	linked := map[string]string{}
+	for _, app := range AllAppTypes {
+		child, err := s.findLinkedProvider(app, existing.ID)
+		if err != nil {
+			return nil, err
+		}
+		if child == nil {
+			meta := map[string]any{
+				"global_id":   existing.ID,
+				"from_global": true,
+			}
+			created, _, err := s.addProvider(app, input, false, meta)
+			if err != nil {
+				return nil, fmt.Errorf("补齐同步到 %s 失败: %w", app.DisplayName(), err)
+			}
+			linked[app.String()] = created.ID
+			continue
+		}
+
+		// 保留关联元数据
+		if child.Meta == nil {
+			child.Meta = map[string]any{}
+		}
+		child.Meta["global_id"] = existing.ID
+		child.Meta["from_global"] = true
+		updated, err := s.updateProvider(app, *child, input)
+		if err != nil {
+			return nil, fmt.Errorf("同步更新 %s 失败: %w", app.DisplayName(), err)
+		}
+		linked[app.String()] = updated.ID
+	}
+
+	if global.Meta == nil {
+		global.Meta = map[string]any{}
+	}
+	global.Meta["linked"] = linked
+	global.Meta["from_global"] = true
+	if err := s.saveProviderRow(AppGlobal, *global); err != nil {
+		return nil, err
+	}
+	return global, nil
+}
+
+func (s *Store) updateProvider(app AppType, existing Provider, input ProviderInput) (*Provider, error) {
 	provider, err := s.buildProvider(app, &existing, input, existing.ID)
 	if err != nil {
 		return nil, err
@@ -292,18 +402,21 @@ func (s *Store) UpdateProvider(app AppType, existing Provider, input ProviderInp
 	provider.Icon = existing.Icon
 	provider.IconColor = existing.IconColor
 	provider.Category = existing.Category
+	provider.Meta = CloneMap(existing.Meta)
 
 	if err := s.saveProviderRow(app, provider); err != nil {
 		return nil, err
 	}
 
-	current, err := s.GetEffectiveCurrentProvider(app)
-	if err != nil {
-		return nil, err
-	}
-	if current == existing.ID {
-		if err := s.writeLiveSettings(app, provider); err != nil {
+	if app.IsLiveApp() {
+		current, err := s.GetEffectiveCurrentProvider(app)
+		if err != nil {
 			return nil, err
+		}
+		if current == existing.ID {
+			if err := s.writeLiveSettings(app, provider); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -311,18 +424,53 @@ func (s *Store) UpdateProvider(app AppType, existing Provider, input ProviderInp
 }
 
 func (s *Store) DeleteProvider(app AppType, id string) error {
+	if app == AppGlobal {
+		return s.DeleteGlobalProvider(id)
+	}
+	return s.deleteProvider(app, id)
+}
+
+// DeleteGlobalProvider 删除全局供应商，并尽量删除各 CLI 中的关联副本。
+func (s *Store) DeleteGlobalProvider(id string) error {
+	var blocked []string
+	for _, app := range AllAppTypes {
+		child, err := s.findLinkedProvider(app, id)
+		if err != nil {
+			return err
+		}
+		if child == nil {
+			continue
+		}
+		if err := s.deleteProvider(app, child.ID); err != nil {
+			blocked = append(blocked, fmt.Sprintf("%s(%s): %v", app.DisplayName(), child.Name, err))
+		}
+	}
+
+	if err := s.deleteProvider(AppGlobal, id); err != nil {
+		return err
+	}
+	if len(blocked) > 0 {
+		return fmt.Errorf("全局供应商已删除，但部分 CLI 副本未删: %s", strings.Join(blocked, "; "))
+	}
+	return nil
+}
+
+func (s *Store) deleteProvider(app AppType, id string) error {
 	providers, err := s.ListProviders(app)
 	if err != nil {
 		return err
 	}
 
-	current, err := s.GetEffectiveCurrentProvider(app)
-	if err != nil {
-		return err
-	}
-	if current == id {
-		if len(providers) > 1 {
-			return fmt.Errorf("不能删除当前正在使用的供应商，请先切换到其他供应商")
+	current := ""
+	if app.IsLiveApp() {
+		current, err = s.GetEffectiveCurrentProvider(app)
+		if err != nil {
+			return err
+		}
+		if current == id {
+			if len(providers) > 1 {
+				return fmt.Errorf("不能删除当前正在使用的供应商，请先切换到其他供应商")
+			}
 		}
 	}
 
@@ -330,7 +478,7 @@ func (s *Store) DeleteProvider(app AppType, id string) error {
 		return fmt.Errorf("删除供应商失败: %w", err)
 	}
 
-	if current == id {
+	if app.IsLiveApp() && current == id {
 		s.settings.setString(currentProviderKey(app), "")
 		if err := s.settings.save(); err != nil {
 			return err
@@ -340,7 +488,24 @@ func (s *Store) DeleteProvider(app AppType, id string) error {
 	return nil
 }
 
+func (s *Store) findLinkedProvider(app AppType, globalID string) (*Provider, error) {
+	providers, err := s.ListProviders(app)
+	if err != nil {
+		return nil, err
+	}
+	for _, provider := range providers {
+		if stringValue(provider.Meta["global_id"]) == globalID {
+			copyProvider := provider
+			return &copyProvider, nil
+		}
+	}
+	return nil, nil
+}
+
 func (s *Store) SwitchProvider(app AppType, id string) error {
+	if !app.IsLiveApp() {
+		return fmt.Errorf("全局供应商不能直接切换，请到 Claude/Codex/Gemini 分组中选择")
+	}
 	target, err := s.GetProvider(app, id)
 	if err != nil {
 		return err
@@ -410,6 +575,17 @@ func (s *Store) GetEffectiveCurrentProvider(app AppType) (string, error) {
 
 func (s *Store) ExtractInput(app AppType, provider Provider) ProviderInput {
 	switch app {
+	case AppGlobal:
+		settings := provider.SettingsConfig
+		return ProviderInput{
+			Name:            provider.Name,
+			BaseURL:         stringValue(settings["base_url"]),
+			APIKey:          stringValue(settings["api_key"]),
+			Model:           stringValue(settings["model"]),
+			ReasoningEffort: stringValue(settings["reasoning_effort"]),
+			Website:         deref(provider.WebsiteURL),
+			Notes:           deref(provider.Notes),
+		}
 	case AppClaude:
 		env := getOrCreateMap(provider.SettingsConfig, "env")
 		apiKey := stringValue(env["ANTHROPIC_AUTH_TOKEN"])
@@ -459,6 +635,12 @@ func (s *Store) ExtractInput(app AppType, provider Provider) ProviderInput {
 
 func (s *Store) EndpointSummary(app AppType, provider Provider) string {
 	switch app {
+	case AppGlobal:
+		baseURL := strings.TrimSpace(stringValue(provider.SettingsConfig["base_url"]))
+		if baseURL == "" {
+			return "未设置 Base URL"
+		}
+		return summarizeURL(baseURL)
 	case AppClaude:
 		env := getOrCreateMap(provider.SettingsConfig, "env")
 		baseURL := strings.TrimSpace(stringValue(env["ANTHROPIC_BASE_URL"]))
@@ -687,6 +869,14 @@ func (s *Store) buildProvider(app AppType, existing *Provider, input ProviderInp
 	provider.Notes = stringPtrOrNil(input.Notes)
 
 	switch app {
+	case AppGlobal:
+		settings := map[string]any{}
+		patchStringField(settings, "base_url", input.BaseURL)
+		patchStringField(settings, "api_key", input.APIKey)
+		patchStringField(settings, "model", input.Model)
+		patchStringField(settings, "reasoning_effort", input.ReasoningEffort)
+		provider.SettingsConfig = settings
+
 	case AppClaude:
 		settings := CloneMap(provider.SettingsConfig)
 		env := getOrCreateMap(settings, "env")
@@ -744,6 +934,25 @@ func (s *Store) buildProvider(app AppType, existing *Provider, input ProviderInp
 		patchStringField(env, "GEMINI_API_KEY", input.APIKey)
 		patchStringField(env, "GEMINI_MODEL", input.Model)
 		settings["env"] = env
+
+		// 同步写入 settings.json 的 model.name，兼容新版 Gemini CLI
+		configDoc := getOrCreateMap(settings, "config")
+		model := strings.TrimSpace(input.Model)
+		if model == "" {
+			if nested, ok := configDoc["model"].(map[string]any); ok {
+				delete(nested, "name")
+				if len(nested) == 0 {
+					delete(configDoc, "model")
+				} else {
+					configDoc["model"] = nested
+				}
+			}
+		} else {
+			modelDoc := getOrCreateMap(configDoc, "model")
+			modelDoc["name"] = model
+			configDoc["model"] = modelDoc
+		}
+		settings["config"] = configDoc
 		provider.SettingsConfig = settings
 	}
 
@@ -843,6 +1052,9 @@ func (s *Store) readLiveSettings(app AppType) (map[string]any, error) {
 }
 
 func (s *Store) writeLiveSettings(app AppType, provider Provider) error {
+	if !app.IsLiveApp() {
+		return fmt.Errorf("%s 不支持写入 live 配置", app.DisplayName())
+	}
 	switch app {
 	case AppClaude:
 		return writeJSONAtomic(s.claudeSettingsPath(), provider.SettingsConfig)

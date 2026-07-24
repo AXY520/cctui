@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"cctui/internal/ccswitch"
+	"cctui/internal/update"
 )
 
 type screenMode int
@@ -22,6 +23,7 @@ const (
 	modeForm
 	modeConfirm
 	modeModelPicker
+	modeUpdateConfirm
 )
 
 type rowKind int
@@ -84,24 +86,39 @@ type pingResultMsg struct {
 	err        error
 }
 
+type updateCheckResultMsg struct {
+	info   *update.Info
+	err    error
+	manual bool
+}
+
+type updateApplyResultMsg struct {
+	path    string
+	version string
+	err     error
+}
+
 var Version = "dev"
 
 type Model struct {
-	store       *ccswitch.Store
-	width       int
-	height      int
-	mode        screenMode
-	rows        []listRow
-	cursor      int
-	current     map[ccswitch.AppType]string
-	providers   map[ccswitch.AppType][]ccswitch.Provider
-	form        formState
-	confirm     *confirmState
-	modelPicker *modelPickerState
-	status      string
-	statusKind  statusLevel
-	selectedKey string
-	pingStatus  map[string]string
+	store          *ccswitch.Store
+	width          int
+	height         int
+	mode           screenMode
+	rows           []listRow
+	cursor         int
+	current        map[ccswitch.AppType]string
+	providers      map[ccswitch.AppType][]ccswitch.Provider
+	form           formState
+	confirm        *confirmState
+	modelPicker    *modelPickerState
+	updateInfo     *update.Info
+	checkingUpdate bool
+	applyingUpdate bool
+	status         string
+	statusKind     statusLevel
+	selectedKey    string
+	pingStatus     map[string]string
 }
 
 var (
@@ -163,7 +180,7 @@ func NewModel(store *ccswitch.Store, warnings []string) (*Model, error) {
 }
 
 func (m *Model) Init() tea.Cmd {
-	return nil
+	return m.checkUpdateCmd(false)
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -194,6 +211,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pingStatus[key] = fmt.Sprintf("✓ %dms %d", typed.latency.Milliseconds(), typed.statusCode)
 		}
 		return m, nil
+	case updateCheckResultMsg:
+		return m.handleUpdateCheckResult(typed)
+	case updateApplyResultMsg:
+		return m.handleUpdateApplyResult(typed)
+	}
+
+	if m.applyingUpdate {
+		// 更新进行中时忽略普通按键，避免并发操作把状态搞乱
+		if key, ok := msg.(tea.KeyMsg); ok {
+			switch key.String() {
+			case "ctrl+c":
+				return m, tea.Quit
+			}
+		}
+		return m, nil
 	}
 
 	switch m.mode {
@@ -205,6 +237,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateConfirm(msg)
 	case modeModelPicker:
 		return m.updateModelPicker(msg)
+	case modeUpdateConfirm:
+		return m.updateUpdateConfirm(msg)
 	default:
 		return m, nil
 	}
@@ -218,6 +252,8 @@ func (m *Model) View() string {
 		return m.viewConfirm()
 	case modeModelPicker:
 		return m.viewModelPicker()
+	case modeUpdateConfirm:
+		return m.viewUpdateConfirm()
 	default:
 		return m.viewList()
 	}
@@ -229,6 +265,13 @@ func (m *Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch typed.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
+		case "u":
+			if m.checkingUpdate || m.applyingUpdate {
+				m.setStatus("正在处理更新，请稍候...", statusInfo)
+				return m, nil
+			}
+			m.setStatus("正在检查更新...", statusInfo)
+			return m, m.checkUpdateCmd(true)
 		case "up", "k":
 			m.moveCursor(-1)
 		case "down", "j":
@@ -242,6 +285,8 @@ func (m *Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.moveToEdge(true)
 		case "G":
 			m.moveToEdge(false)
+		case "0":
+			m.jumpToApp(ccswitch.AppGlobal)
 		case "1":
 			m.jumpToApp(ccswitch.AppClaude)
 		case "2":
@@ -277,6 +322,10 @@ func (m *Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, textinput.Blink
 			case rowProvider:
 				if row.provider == nil {
+					return m, nil
+				}
+				if row.app == ccswitch.AppGlobal {
+					m.setStatus("全局供应商已同步到各 CLI，请到 Claude/Codex/Gemini 中按 Enter 切换", statusInfo)
 					return m, nil
 				}
 				if m.current[row.app] == row.provider.ID {
@@ -565,7 +614,11 @@ func (m *Model) saveForm() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.selectedKey = providerKey(m.form.app, updated.ID)
-		statusMessage = fmt.Sprintf("已更新 %s", updated.Name)
+		if m.form.app == ccswitch.AppGlobal {
+			statusMessage = fmt.Sprintf("已更新全局供应商 %s，并同步到 Claude/Codex/Gemini", updated.Name)
+		} else {
+			statusMessage = fmt.Sprintf("已更新 %s", updated.Name)
+		}
 	} else {
 		created, autoSwitched, err := m.store.AddProvider(m.form.app, input)
 		if err != nil {
@@ -573,9 +626,13 @@ func (m *Model) saveForm() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.selectedKey = providerKey(m.form.app, created.ID)
-		statusMessage = fmt.Sprintf("已添加 %s", created.Name)
-		if autoSwitched {
-			statusMessage += "，并自动设为当前供应商"
+		if m.form.app == ccswitch.AppGlobal {
+			statusMessage = fmt.Sprintf("已添加全局供应商 %s，并同步到 Claude/Codex/Gemini（未自动切换）", created.Name)
+		} else {
+			statusMessage = fmt.Sprintf("已添加 %s", created.Name)
+			if autoSwitched {
+				statusMessage += "，并自动设为当前供应商"
+			}
 		}
 	}
 
@@ -602,7 +659,7 @@ func (m *Model) reload() error {
 
 func (m *Model) rebuildRows() {
 	rows := make([]listRow, 0, 32)
-	for index, app := range ccswitch.AllAppTypes {
+	for index, app := range ccswitch.UIAppTypes {
 		if index > 0 {
 			rows = append(rows, listRow{kind: rowSpacer, key: fmt.Sprintf("spacer:%d", index)})
 		}
@@ -742,6 +799,178 @@ func (m *Model) pingProvider(app ccswitch.AppType, provider ccswitch.Provider) t
 	}
 }
 
+func (m *Model) checkUpdateCmd(manual bool) tea.Cmd {
+	if m.checkingUpdate || m.applyingUpdate {
+		return nil
+	}
+	// 开发版默认不自动联网检查，避免本地 go run 每次被正式版弹窗打扰
+	if !manual && (Version == "" || Version == "dev") {
+		return nil
+	}
+	m.checkingUpdate = true
+	current := Version
+	return func() tea.Msg {
+		info, err := update.Check(current)
+		return updateCheckResultMsg{info: info, err: err, manual: manual}
+	}
+}
+
+func (m *Model) applyUpdateCmd(info *update.Info) tea.Cmd {
+	if info == nil {
+		return nil
+	}
+	m.applyingUpdate = true
+	return func() tea.Msg {
+		path, err := update.Apply(info)
+		return updateApplyResultMsg{path: path, version: info.Latest, err: err}
+	}
+}
+
+func (m *Model) handleUpdateCheckResult(msg updateCheckResultMsg) (tea.Model, tea.Cmd) {
+	m.checkingUpdate = false
+
+	if msg.err != nil {
+		if msg.manual {
+			m.setStatus(fmt.Sprintf("检查更新失败: %v", msg.err), statusError)
+		}
+		// 自动检查失败保持安静，避免启动时刷网络错误
+		return m, nil
+	}
+
+	if msg.info == nil {
+		if msg.manual {
+			m.setStatus(fmt.Sprintf("已是最新版本 (%s)", update.Normalize(Version)), statusSuccess)
+		}
+		return m, nil
+	}
+
+	// 列表/空闲时才打断用户；手动检查可从任意列表态进入
+	if m.mode != modeList && !msg.manual {
+		m.updateInfo = msg.info
+		m.setStatus(fmt.Sprintf("发现新版本 v%s，按 u 查看", msg.info.Latest), statusInfo)
+		return m, nil
+	}
+
+	m.updateInfo = msg.info
+	m.mode = modeUpdateConfirm
+	m.setStatus(fmt.Sprintf("发现新版本 v%s", msg.info.Latest), statusInfo)
+	return m, nil
+}
+
+func (m *Model) handleUpdateApplyResult(msg updateApplyResultMsg) (tea.Model, tea.Cmd) {
+	m.applyingUpdate = false
+	m.mode = modeList
+	m.updateInfo = nil
+
+	if msg.err != nil {
+		m.setStatus(fmt.Sprintf("更新失败: %v", msg.err), statusError)
+		return m, nil
+	}
+
+	m.setStatus(fmt.Sprintf("已更新到 v%s，请重启 cctui 生效（%s）", msg.version, msg.path), statusSuccess)
+	return m, nil
+}
+
+func (m *Model) updateUpdateConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch typed := msg.(type) {
+	case tea.KeyMsg:
+		switch typed.String() {
+		case "q", "n", "esc":
+			m.mode = modeList
+			m.updateInfo = nil
+			m.setStatus("已跳过本次更新", statusInfo)
+			return m, nil
+		case "enter", "y":
+			if m.updateInfo == nil {
+				m.mode = modeList
+				return m, nil
+			}
+			m.setStatus(fmt.Sprintf("正在下载并安装 v%s ...", m.updateInfo.Latest), statusInfo)
+			return m, m.applyUpdateCmd(m.updateInfo)
+		}
+	}
+	return m, nil
+}
+
+func (m *Model) viewUpdateConfirm() string {
+	if m.updateInfo == nil {
+		return m.viewList()
+	}
+
+	title := "发现新版本"
+	if m.applyingUpdate {
+		title = "正在更新"
+	}
+
+	notes := strings.TrimSpace(m.updateInfo.Notes)
+	if notes == "" {
+		notes = "无更新说明"
+	}
+	noteLines := wrapText(notes, max(24, min(m.width-12, 72)))
+	if len(noteLines) > 6 {
+		noteLines = append(noteLines[:6], "...")
+	}
+
+	body := []string{
+		panelTitleStyle.Render(title),
+		"",
+		fmt.Sprintf("当前版本: %s", displayVersion(Version)),
+		fmt.Sprintf("最新版本: v%s", m.updateInfo.Latest),
+		fmt.Sprintf("发布源:   %s", m.updateInfo.Source),
+		fmt.Sprintf("安装位置: %s", firstNonEmptyLocal(m.updateInfo.Executable, "(未知)")),
+		"",
+		labelStyle.Render("更新说明"),
+	}
+	body = append(body, noteLines...)
+	body = append(body, "")
+	if m.applyingUpdate {
+		body = append(body, successStyle.Render("正在下载并替换二进制，请稍候..."))
+	} else {
+		body = append(body,
+			"确认后将自动下载预编译包并替换当前程序。",
+			"旧版本会备份为 cctui.bak。",
+			"按 Enter / y 立即更新，q / n 稍后处理。",
+		)
+	}
+
+	panelLines := strings.Split(panelStyle.Width(max(50, min(m.width-8, 80))).Render(strings.Join(body, "\n")), "\n")
+	helpLines := m.renderHelpLines()
+	page := []string{m.renderHeader()}
+	topPadding := (m.height - len(panelLines) - len(helpLines) - 1) / 2
+	if topPadding < 1 {
+		topPadding = 1
+	}
+	for i := 0; i < topPadding; i++ {
+		page = append(page, "")
+	}
+	page = append(page, panelLines...)
+	for len(page)+len(helpLines) < m.height {
+		page = append(page, "")
+	}
+	page = append(page, helpLines...)
+	return strings.Join(page, "\n")
+}
+
+func displayVersion(version string) string {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return "dev"
+	}
+	if version == "dev" || strings.HasPrefix(version, "v") || strings.HasPrefix(version, "V") {
+		return version
+	}
+	return "v" + version
+}
+
+func firstNonEmptyLocal(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func (m *Model) setStatus(message string, kind statusLevel) {
 	m.status = message
 	m.statusKind = kind
@@ -832,9 +1061,15 @@ func (m *Model) viewModelPicker() string {
 }
 
 func (m *Model) viewForm() string {
-	title := "Add " + m.form.app.DisplayName() + " Provider"
+	title := "新增 " + m.form.app.DisplayName() + " 供应商"
+	if m.form.app == ccswitch.AppGlobal {
+		title = "新增全局供应商"
+	}
 	if m.form.editMode {
-		title = "Edit " + m.form.app.DisplayName() + " Provider"
+		title = "编辑 " + m.form.app.DisplayName() + " 供应商"
+		if m.form.app == ccswitch.AppGlobal {
+			title = "编辑全局供应商"
+		}
 	}
 
 	lines := []string{
@@ -878,7 +1113,20 @@ func (m *Model) viewConfirm() string {
 		"Switch to another provider first.",
 	}
 
-	if m.current[m.confirm.app] != m.confirm.provider.ID {
+	if m.confirm.app == ccswitch.AppGlobal {
+		body = []string{
+			dangerStyle.Render("删除全局供应商"),
+			"",
+			fmt.Sprintf("名称: %s", m.confirm.provider.Name),
+		}
+		body = append(body, providerURLLines(m.store, m.confirm.app, m.confirm.provider, max(24, min(m.width-8, 80)-6))...)
+		body = append(body,
+			"",
+			"将删除该全局模板，并尝试删除 Claude/Codex/Gemini 中的关联副本。",
+			"若某 CLI 正在使用该副本且还有其他供应商，则该副本会保留。",
+			"按 Enter / y 确认，q / n 返回。",
+		)
+	} else if m.current[m.confirm.app] != m.confirm.provider.ID {
 		body = []string{
 			dangerStyle.Render(title),
 			"",
@@ -977,15 +1225,22 @@ func (m *Model) renderHeaderMeta(maxWidth int) string {
 func (m *Model) renderGroupHeading(app ccswitch.AppType) string {
 	label := groupStyle.Render(app.DisplayName())
 	currentName := ""
-	if currentID, ok := m.current[app]; ok && currentID != "" {
-		for _, p := range m.providers[app] {
-			if p.ID == currentID {
-				currentName = " → " + currentStyle.Render(p.Name)
-				break
+	if app.IsLiveApp() {
+		if currentID, ok := m.current[app]; ok && currentID != "" {
+			for _, p := range m.providers[app] {
+				if p.ID == currentID {
+					currentName = " → " + currentStyle.Render(p.Name)
+					break
+				}
 			}
 		}
 	}
-	summary := mutedStyle.Render(fmt.Sprintf("(%d 个供应商", len(m.providers[app]))) + currentName + mutedStyle.Render(")")
+	count := len(m.providers[app])
+	suffix := "个供应商"
+	if app == ccswitch.AppGlobal {
+		suffix = "个全局模板"
+	}
+	summary := mutedStyle.Render(fmt.Sprintf("(%d %s", count, suffix)) + currentName + mutedStyle.Render(")")
 	return label + " " + summary
 }
 
@@ -995,7 +1250,8 @@ func (m *Model) renderProviderRow(index int, row listRow) string {
 	}
 
 	selected := index == m.cursor
-	isCurrent := m.current[row.app] == row.provider.ID
+	isCurrent := row.app.IsLiveApp() && m.current[row.app] == row.provider.ID
+	fromGlobal := stringValueAny(row.provider.Meta["from_global"]) == "true" || stringValueAny(row.provider.Meta["global_id"]) != ""
 	prefix := "  "
 	if selected {
 		prefix = "▶ "
@@ -1003,6 +1259,10 @@ func (m *Model) renderProviderRow(index int, row listRow) string {
 	currentMark := " "
 	if isCurrent {
 		currentMark = "●"
+	} else if row.app == ccswitch.AppGlobal {
+		currentMark = "◎"
+	} else if fromGlobal {
+		currentMark = "↻"
 	}
 
 	nameWidth, endpointWidth := m.providerColumnWidths(isCurrent)
@@ -1031,7 +1291,11 @@ func (m *Model) renderAddRow(index int, row listRow) string {
 	if selected {
 		prefix = "▶ "
 	}
-	line := truncate(fmt.Sprintf("%s+ 添加 %s 供应商", prefix, row.app.DisplayName()), max(20, m.width-2))
+	label := row.app.DisplayName()
+	if row.app == ccswitch.AppGlobal {
+		label = "全局"
+	}
+	line := truncate(fmt.Sprintf("%s+ 添加 %s 供应商", prefix, label), max(20, m.width-2))
 	if selected {
 		return selectedAddStyle.Render(line)
 	}
@@ -1097,15 +1361,25 @@ func (m *Model) renderHelpLines() []string {
 				help("q/n", "返回"),
 			}
 		}
+	case modeUpdateConfirm:
+		if m.applyingUpdate {
+			items = []string{help("ctrl+c", "强制退出")}
+		} else {
+			items = []string{
+				help("Enter/y", "立即更新"),
+				help("q/n", "稍后"),
+			}
+		}
 	default:
 		items = []string{
 			help("↑/↓ j/k", "移动"),
 			help("Enter", "设为当前"),
 			help("t", "测速"),
+			help("u", "检查更新"),
 			help("a", "添加"),
 			help("e", "编辑"),
 			help("d", "删除"),
-			help("1/2/3", "跳应用"),
+			help("0/1/2/3", "跳分组"),
 			help("g/G", "顶/底"),
 			help("q", "退出"),
 		}
@@ -1127,7 +1401,7 @@ func newFormState(app ccswitch.AppType, provider *ccswitch.Provider, input ccswi
 		input.Model,
 	}
 
-	if app == ccswitch.AppCodex {
+	if app == ccswitch.AppCodex || app == ccswitch.AppGlobal {
 		labels = append(labels, "Reasoning Effort")
 		values = append(values, input.ReasoningEffort)
 	}
@@ -1193,7 +1467,7 @@ func (m *Model) formInput() ccswitch.ProviderInput {
 	}
 
 	next := 4
-	if m.form.app == ccswitch.AppCodex {
+	if m.form.app == ccswitch.AppCodex || m.form.app == ccswitch.AppGlobal {
 		input.ReasoningEffort = field(next)
 		next++
 	}
@@ -1245,6 +1519,11 @@ func (m *Model) modeLabel() string {
 		return "新增"
 	case modeConfirm:
 		return "确认"
+	case modeUpdateConfirm:
+		if m.applyingUpdate {
+			return "更新中"
+		}
+		return "发现更新"
 	default:
 		return "列表"
 	}
@@ -1279,40 +1558,46 @@ func (m *Model) providerCount(app ccswitch.AppType) int {
 
 func (m *Model) formHint() string {
 	switch m.form.app {
+	case ccswitch.AppGlobal:
+		return "保存后会同步到 Claude / Codex / Gemini，不会自动切换当前供应商"
 	case ccswitch.AppClaude:
-		return "Saved to ~/.claude/settings.json (or legacy claude.json)"
+		return "写入 ~/.claude/settings.json（兼容旧版 claude.json）"
 	case ccswitch.AppCodex:
-		return "Saved to ~/.codex/auth.json and ~/.codex/config.toml"
+		return "写入 ~/.codex/auth.json 与 ~/.codex/config.toml"
 	case ccswitch.AppGemini:
-		return "Saved to ~/.gemini/.env and ~/.gemini/settings.json"
+		return "写入 ~/.gemini/.env 与 ~/.gemini/settings.json"
 	default:
-		return "Saved to the app live config"
+		return "写入对应 CLI 的 live 配置"
 	}
 }
 
 func placeholderFor(app ccswitch.AppType, label string) string {
 	switch label {
 	case "Name":
-		return "e.g. Official / Relay / Company Internal"
+		return "例如 Official / 中转 / 公司内网"
 	case "Base URL":
 		switch app {
+		case ccswitch.AppGlobal:
+			return "例如 https://api.example.com 或带 /v1 的网关地址"
 		case ccswitch.AppClaude:
-			return "e.g. https://api.anthropic.com"
+			return "例如 https://api.anthropic.com"
 		case ccswitch.AppCodex:
-			return "e.g. https://api.openai.com/v1"
+			return "例如 https://api.openai.com/v1"
 		case ccswitch.AppGemini:
-			return "e.g. https://generativelanguage.googleapis.com"
+			return "例如 https://generativelanguage.googleapis.com"
 		}
 	case "API Key":
-		return "Leave empty to keep OAuth / login semantics"
+		return "可留空以保留 OAuth / 登录态"
 	case "Model":
 		switch app {
+		case ccswitch.AppGlobal:
+			return "例如 gpt-5 / claude-sonnet / gemini-2.5-pro"
 		case ccswitch.AppClaude:
-			return "e.g. claude-sonnet-4-5"
+			return "例如 claude-sonnet-4-5"
 		case ccswitch.AppCodex:
-			return "e.g. gpt-5-codex"
+			return "例如 gpt-5-codex"
 		case ccswitch.AppGemini:
-			return "e.g. gemini-2.5-pro"
+			return "例如 gemini-2.5-pro"
 		}
 	case "Reasoning Effort":
 		return "e.g. medium / high"
@@ -1497,4 +1782,23 @@ func truncate(input string, limit int) string {
 		return "…"
 	}
 	return builder.String() + "…"
+}
+
+func stringValueAny(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case bool:
+		if typed {
+			return "true"
+		}
+		return "false"
+	case fmt.Stringer:
+		return strings.TrimSpace(typed.String())
+	default:
+		if value == nil {
+			return ""
+		}
+		return strings.TrimSpace(fmt.Sprint(value))
+	}
 }

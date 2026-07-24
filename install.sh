@@ -216,7 +216,7 @@ main() {
   local iv; iv="$(installed_version 2>/dev/null)" || true
   if [[ -n "$iv" && "$latest" != "获取失败" && "${iv#v}" != "${latest#v}" ]]; then
     msg="发现新版本！"
-    has_update=1
+    has_update=y
   fi
 
   # 计算可用选项
