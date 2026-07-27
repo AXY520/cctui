@@ -18,11 +18,12 @@ func TestPiProviderWriteAndSwitch(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 
 	created, auto, err := store.AddProvider(AppPi, ProviderInput{
-		Name:    "Local Gateway",
-		BaseURL: "https://gateway.example.com/v1",
-		APIKey:  "sk-test",
-		Model:   "demo-model",
-		APIType: "openai-completions",
+		Name:          "Local Gateway",
+		BaseURL:       "https://gateway.example.com/v1",
+		APIKey:        "sk-test",
+		Model:         "demo-model",
+		APIType:       "openai-completions",
+		ContextWindow: 200000,
 	})
 	if err != nil {
 		t.Fatalf("add: %v", err)
@@ -60,6 +61,21 @@ func TestPiProviderWriteAndSwitch(t *testing.T) {
 	}
 	if entry["api"] != "openai-completions" {
 		t.Fatalf("api=%v", entry["api"])
+	}
+	models := entry["models"].([]any)
+	if len(models) != 1 {
+		t.Fatalf("models len=%d", len(models))
+	}
+	model := models[0].(map[string]any)
+	if model["id"] != "demo-model" {
+		t.Fatalf("model id=%v", model["id"])
+	}
+	if int(model["contextWindow"].(float64)) != 200000 {
+		t.Fatalf("contextWindow=%v", model["contextWindow"])
+	}
+	extracted := store.ExtractInput(AppPi, *created)
+	if extracted.ContextWindow != 200000 {
+		t.Fatalf("extract contextWindow=%d", extracted.ContextWindow)
 	}
 
 	authRaw, _ := os.ReadFile(authPath)

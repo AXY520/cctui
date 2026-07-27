@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -281,7 +282,7 @@ func (m *Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch typed := msg.(type) {
 	case tea.KeyMsg:
 		switch typed.String() {
-		case "ctrl+c", "q":
+		case "ctrl+c", "esc":
 			return m, tea.Quit
 		case "u":
 			if m.checkingUpdate || m.applyingUpdate {
@@ -443,7 +444,7 @@ func (m *Model) updateConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch typed := msg.(type) {
 	case tea.KeyMsg:
 		switch typed.String() {
-		case "q", "n":
+		case "esc", "n":
 			m.mode = modeList
 			m.confirm = nil
 			m.setStatus("已取消删除", statusInfo)
@@ -481,7 +482,7 @@ func (m *Model) updateModelPicker(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch typed := msg.(type) {
 	case tea.KeyMsg:
 		switch typed.String() {
-		case "esc", "q":
+		case "esc":
 			m.mode = modeForm
 			m.modelPicker = nil
 			return m, nil
@@ -926,7 +927,7 @@ func (m *Model) updateUpdateConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch typed := msg.(type) {
 	case tea.KeyMsg:
 		switch typed.String() {
-		case "q", "n", "esc":
+		case "esc", "n":
 			m.mode = modeList
 			m.updateInfo = nil
 			m.setStatus("已跳过本次更新", statusInfo)
@@ -980,7 +981,7 @@ func (m *Model) viewUpdateConfirm() string {
 		body = append(body,
 			"确认后将自动下载预编译包并替换当前程序。",
 			"旧版本会备份为 cctui.bak。",
-			"按 Enter / y 立即更新，q / n 稍后处理。",
+			"按 Enter / y 立即更新，Esc / n 稍后处理。",
 		)
 	}
 
@@ -1183,7 +1184,7 @@ func (m *Model) viewConfirm() string {
 			"",
 			"将删除该全局模板，并尝试删除 Claude/Codex/Gemini/Pi 中的关联副本。",
 			"若某 CLI 正在使用该副本且还有其他供应商，则该副本会保留。",
-			"按 Enter / y 确认，q / n 返回。",
+			"按 Enter / y 确认，Esc / n 返回。",
 		)
 	} else if m.current[m.confirm.app] != m.confirm.provider.ID {
 		body = []string{
@@ -1196,7 +1197,7 @@ func (m *Model) viewConfirm() string {
 		body = append(body,
 			"",
 			"This will remove the provider record from the database.",
-			"Press Enter / y to confirm, q / n to go back.",
+			"Press Enter / y to confirm, Esc / n to go back.",
 		)
 	} else if canDeleteCurrent {
 		body = []string{
@@ -1207,7 +1208,7 @@ func (m *Model) viewConfirm() string {
 			"",
 			"This is the last provider for the app.",
 			"After deletion, the app will have no active provider.",
-			"Press Enter / y to confirm, q / n to go back.",
+			"Press Enter / y to confirm, Esc / n to go back.",
 		}
 	}
 
@@ -1414,11 +1415,11 @@ func (m *Model) renderHelpLines() []string {
 		}
 	case modeConfirm:
 		if m.confirm != nil && m.current[m.confirm.app] == m.confirm.provider.ID && !m.canDeleteCurrentConfirm() {
-			items = []string{help("q", "返回")}
+			items = []string{help("Esc", "返回")}
 		} else {
 			items = []string{
 				help("Enter/y", "确认"),
-				help("q/n", "返回"),
+				help("Esc/n", "返回"),
 			}
 		}
 	case modeUpdateConfirm:
@@ -1427,7 +1428,7 @@ func (m *Model) renderHelpLines() []string {
 		} else {
 			items = []string{
 				help("Enter/y", "立即更新"),
-				help("q/n", "稍后"),
+				help("Esc/n", "稍后"),
 			}
 		}
 	default:
@@ -1441,7 +1442,7 @@ func (m *Model) renderHelpLines() []string {
 			help("d", "删除"),
 			help("0-4", "跳分组"),
 			help("g/G", "顶/底"),
-			help("q", "退出"),
+			help("Esc", "退出"),
 		}
 	}
 	return wrapInlineItems(items, max(20, m.width-2))
@@ -1472,6 +1473,13 @@ func newFormState(app ccswitch.AppType, provider *ccswitch.Provider, input ccswi
 		}
 		labels = append(labels, "API Type")
 		values = append(values, apiType)
+
+		contextWindow := input.ContextWindow
+		if contextWindow <= 0 {
+			contextWindow = 128000
+		}
+		labels = append(labels, "Context Window")
+		values = append(values, fmt.Sprintf("%d", contextWindow))
 	}
 
 	labels = append(labels, "Website", "Notes")
@@ -1541,6 +1549,10 @@ func (m *Model) formInput() ccswitch.ProviderInput {
 	}
 	if m.form.app == ccswitch.AppPi {
 		input.APIType = field(next)
+		next++
+		if n, err := strconv.Atoi(field(next)); err == nil {
+			input.ContextWindow = n
+		}
 		next++
 	}
 	input.Website = field(next)
@@ -1795,6 +1807,8 @@ func placeholderFor(app ccswitch.AppType, label string) string {
 		}
 	case "API Type":
 		return "openai-completions / openai-responses / anthropic-messages / google-generative-ai"
+	case "Context Window":
+		return "例如 128000 / 200000"
 	case "Reasoning Effort":
 		return "默认 / minimal / low / medium / high / xhigh"
 	case "Website":

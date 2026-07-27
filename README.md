@@ -118,7 +118,7 @@ cctui help                # 帮助
 - `t`：对当前供应商测速
 - `0/1/2/3/4`：跳到 全局 / Claude / Codex / Gemini / Pi
 
-表单里 `Reasoning Effort`（Codex/全局）和 `API Type`（Pi）支持 **Enter 弹出选项** 或 **←/→ 快速切换**，不用手打。
+表单里 `Reasoning Effort`（Codex/全局）和 `API Type`（Pi）支持 **Enter 弹出选项** 或 **←/→ 快速切换**，不用手打。Pi 还可配置模型 `Context Window`。
 - `↑/↓` 或 `j/k`：移动光标
 
 ### 全局供应商
@@ -130,14 +130,14 @@ cctui help                # 帮助
 编辑全局供应商会同步更新各 CLI/Agent 中的关联副本；删除全局供应商会尽量删除这些副本（若某 CLI 正在使用且还有其他供应商，则该副本会保留）。
 - `1/2/3`：快速跳转到 `Claude` / `Codex` / `Gemini`
 - `g/G`：跳到顶部 / 底部
-- `q`：退出
+- `Esc`：退出
 
 表单模式下：
 
 - `Tab` / `Shift+Tab`：切换字段
 - `Enter`：下一项，最后一项时保存
 - `Ctrl+S`：保存
-- `q`：取消并返回
+- `Esc`：取消并返回
 
 ## 供应商字段说明
 
@@ -150,9 +150,14 @@ cctui help                # 帮助
 - `Website`：可选，供应商官网
 - `Notes`：可选，备注
 
-`Codex` 独有字段：
+`Codex` / 全局 独有字段：
 
-- `Reasoning Effort`：例如 `medium`、`high`
+- `Reasoning Effort`：可选，`默认 / minimal / low / medium / high / xhigh`
+
+`Pi` 独有字段：
+
+- `API Type`：可选，`openai-completions` / `openai-responses` / `anthropic-messages` / `google-generative-ai`
+- `Context Window`：模型上下文窗口，默认 `128000`
 
 ## 默认行为
 

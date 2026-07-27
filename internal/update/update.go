@@ -359,21 +359,13 @@ func ensureWritable(path string) error {
 		return fmt.Errorf("安装路径无效: %s", dir)
 	}
 
-	// 尝试在同目录创建临时文件判断写权限
+	// 只检查目录可写。Linux 上正在运行的二进制用 O_WRONLY 打开会 ETXTBSY，
+	// 自更新应通过同目录写 .new + rename 完成，不能要求“当前文件可写”。
 	testFile := filepath.Join(dir, ".cctui-write-test")
 	if err := os.WriteFile(testFile, []byte("ok"), 0o600); err != nil {
-		return fmt.Errorf("安装目录不可写: %s（可改用 install.sh 或手动替换）", dir)
+		return fmt.Errorf("安装目录不可写: %s（可改用 cctui update 到用户目录，或 install.sh）", dir)
 	}
 	_ = os.Remove(testFile)
-
-	// 目标文件存在时也要可写
-	if _, err := os.Stat(path); err == nil {
-		file, err := os.OpenFile(path, os.O_WRONLY, 0)
-		if err != nil {
-			return fmt.Errorf("当前程序不可写: %s", path)
-		}
-		file.Close()
-	}
 	return nil
 }
 
@@ -385,19 +377,21 @@ func replaceExecutable(target, source string) error {
 	if err != nil {
 		return fmt.Errorf("读取新版本失败: %w", err)
 	}
+
+	// 先写临时文件到同目录，再原子 rename。这样即使 target 正在运行也能替换。
 	if err := os.WriteFile(temp, data, 0o755); err != nil {
 		return fmt.Errorf("写入新版本失败: %w", err)
 	}
+	_ = os.Chmod(temp, 0o755)
 
-	// 备份旧文件；失败不阻断更新
+	// 备份旧文件（运行中 rename 在 Linux 通常可行）
 	_ = os.Remove(backup)
 	if err := os.Rename(target, backup); err != nil {
-		// 某些环境 rename 运行中文件会失败，尝试直接覆盖
-		if copyErr := copyFile(source, target); copyErr != nil {
+		// 部分系统/权限下 rename 失败：尝试直接用新文件顶上（仍避免 truncation 写运行中文件）
+		if err2 := os.Rename(temp, target); err2 != nil {
 			_ = os.Remove(temp)
-			return fmt.Errorf("替换失败: %v / %v", err, copyErr)
+			return fmt.Errorf("替换失败: 无法备份旧版本(%v)，也无法启用新版本(%v)。若安装在系统目录，请用有权限的方式安装到 ~/.local/bin", err, err2)
 		}
-		_ = os.Remove(temp)
 		return nil
 	}
 
@@ -410,23 +404,4 @@ func replaceExecutable(target, source string) error {
 
 	_ = os.Chmod(target, 0o755)
 	return nil
-}
-
-func copyFile(source, target string) error {
-	in, err := os.Open(source)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-
-	out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	if _, err := io.Copy(out, in); err != nil {
-		return err
-	}
-	return out.Close()
 }

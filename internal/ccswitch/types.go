@@ -80,6 +80,7 @@ type ProviderInput struct {
 	APIKey          string
 	Model           string
 	APIType         string // Pi: openai-completions / openai-responses / anthropic-messages / google-generative-ai
+	ContextWindow   int    // Pi model context window; 0 means default 128000
 	ReasoningEffort string
 	Website         string
 	Notes           string

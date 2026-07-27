@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -634,14 +635,16 @@ func (s *Store) ExtractInput(app AppType, provider Provider) ProviderInput {
 			Notes:   deref(provider.Notes),
 		}
 	case AppPi:
+		modelID := firstNonEmpty(stringValue(provider.SettingsConfig["model"]), firstPiModelID(provider.SettingsConfig))
 		return ProviderInput{
-			Name:    provider.Name,
-			BaseURL: stringValue(provider.SettingsConfig["baseUrl"]),
-			APIKey:  firstNonEmpty(stringValue(provider.SettingsConfig["apiKey"]), piAuthKeyFromSettings(provider.SettingsConfig)),
-			Model:   firstNonEmpty(stringValue(provider.SettingsConfig["model"]), firstPiModelID(provider.SettingsConfig)),
-			APIType: firstNonEmpty(stringValue(provider.SettingsConfig["api"]), "openai-completions"),
-			Website: deref(provider.WebsiteURL),
-			Notes:   deref(provider.Notes),
+			Name:          provider.Name,
+			BaseURL:       stringValue(provider.SettingsConfig["baseUrl"]),
+			APIKey:        firstNonEmpty(stringValue(provider.SettingsConfig["apiKey"]), piAuthKeyFromSettings(provider.SettingsConfig)),
+			Model:         modelID,
+			APIType:       firstNonEmpty(stringValue(provider.SettingsConfig["api"]), "openai-completions"),
+			ContextWindow: piContextWindowFromSettings(provider.SettingsConfig, modelID),
+			Website:       deref(provider.WebsiteURL),
+			Notes:         deref(provider.Notes),
 		}
 	default:
 		return ProviderInput{Name: provider.Name}
@@ -1065,6 +1068,7 @@ func (s *Store) buildProvider(app AppType, existing *Provider, input ProviderInp
 			apiType = firstNonEmpty(stringValue(settings["api"]), "openai-completions")
 		}
 		modelID := strings.TrimSpace(input.Model)
+		contextWindow := normalizePiContextWindow(input.ContextWindow)
 
 		models := []any{}
 		if rawModels, ok := settings["models"].([]any); ok {
@@ -1074,7 +1078,11 @@ func (s *Store) buildProvider(app AppType, existing *Provider, input ProviderInp
 					continue
 				}
 				if modelID == "" || stringValue(modelMap["id"]) == modelID {
-					models = append(models, CloneMap(modelMap))
+					cloned := CloneMap(modelMap)
+					if modelID != "" && stringValue(cloned["id"]) == modelID {
+						cloned["contextWindow"] = contextWindow
+					}
+					models = append(models, cloned)
 				}
 			}
 		}
@@ -1092,18 +1100,19 @@ func (s *Store) buildProvider(app AppType, existing *Provider, input ProviderInp
 					"name":          modelID,
 					"reasoning":     true,
 					"input":         []any{"text"},
-					"contextWindow": 128000,
+					"contextWindow": contextWindow,
 				})
 			}
 		}
 
 		next := map[string]any{
-			"providerId": providerID,
-			"baseUrl":    strings.TrimSpace(input.BaseURL),
-			"api":        apiType,
-			"apiKey":     strings.TrimSpace(input.APIKey),
-			"model":      modelID,
-			"models":     models,
+			"providerId":    providerID,
+			"baseUrl":       strings.TrimSpace(input.BaseURL),
+			"api":           apiType,
+			"apiKey":        strings.TrimSpace(input.APIKey),
+			"model":         modelID,
+			"contextWindow": contextWindow,
+			"models":        models,
 		}
 		if compat, ok := settings["compat"]; ok {
 			next["compat"] = compat
@@ -1496,7 +1505,7 @@ func (s *Store) writePiLive(provider Provider) error {
 				"name":          modelID,
 				"reasoning":     true,
 				"input":         []any{"text"},
-				"contextWindow": 128000,
+				"contextWindow": normalizePiContextWindow(intValue(cfg["contextWindow"])),
 			},
 		}
 	} else {
@@ -1680,6 +1689,71 @@ func firstPiModelID(settings map[string]any) string {
 		return stringValue(modelMap["id"])
 	}
 	return ""
+}
+
+const defaultPiContextWindow = 128000
+
+func normalizePiContextWindow(value int) int {
+	if value <= 0 {
+		return defaultPiContextWindow
+	}
+	return value
+}
+
+func piContextWindowFromSettings(settings map[string]any, modelID string) int {
+	if value := intValue(settings["contextWindow"]); value > 0 {
+		return value
+	}
+	raw, ok := settings["models"]
+	if !ok {
+		return defaultPiContextWindow
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		return defaultPiContextWindow
+	}
+	modelID = strings.TrimSpace(modelID)
+	for _, item := range list {
+		modelMap, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if modelID == "" || stringValue(modelMap["id"]) == modelID {
+			if value := intValue(modelMap["contextWindow"]); value > 0 {
+				return value
+			}
+			if modelID != "" {
+				break
+			}
+		}
+	}
+	return defaultPiContextWindow
+}
+
+func intValue(value any) int {
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int32:
+		return int(typed)
+	case int64:
+		return int(typed)
+	case float32:
+		return int(typed)
+	case float64:
+		return int(typed)
+	case json.Number:
+		n, err := typed.Int64()
+		if err == nil {
+			return int(n)
+		}
+	case string:
+		n, err := strconv.Atoi(strings.TrimSpace(typed))
+		if err == nil {
+			return n
+		}
+	}
+	return 0
 }
 
 func patchCodexConfig(existing string, input ProviderInput) (string, error) {
