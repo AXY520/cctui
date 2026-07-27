@@ -118,7 +118,7 @@ cctui help                # 帮助
 - `t`：对当前供应商测速
 - `0/1/2/3/4`：跳到 全局 / Claude / Codex / Gemini / Pi
 
-表单里 `Reasoning Effort`（Codex/全局）和 `API Type`（Pi）支持 **Enter 弹出选项** 或 **←/→ 快速切换**，不用手打。Pi 还可配置模型 `Context Window`。
+表单里多项枚举字段（Reasoning Effort/Summary、Verbosity、Service Tier、Wire API、API Type、Reasoning、compat 开关等）支持 **Enter 弹出选项** 或 **←/→ 切换**。
 - `↑/↓` 或 `j/k`：移动光标
 
 ### 全局供应商
@@ -150,14 +150,29 @@ cctui help                # 帮助
 - `Website`：可选，供应商官网
 - `Notes`：可选，备注
 
-`Codex` / 全局 独有字段：
+`Claude` 扩展字段：
 
-- `Reasoning Effort`：可选，`默认 / minimal / low / medium / high / xhigh`
+- `Reasoning Model`：写入 `ANTHROPIC_REASONING_MODEL`
+- `Haiku/Fast Model`：写入 `ANTHROPIC_DEFAULT_HAIKU_MODEL` 与 `ANTHROPIC_SMALL_FAST_MODEL`；留空则与主 Model 相同
 
-`Pi` 独有字段：
+`Codex` 扩展字段：
 
-- `API Type`：可选，`openai-completions` / `openai-responses` / `anthropic-messages` / `google-generative-ai`
-- `Context Window`：模型上下文窗口，默认 `128000`
+- `Reasoning Effort`：`minimal / low / medium / high / xhigh`
+- `Reasoning Summary`：`auto / concise / detailed / none`
+- `Verbosity`：`low / medium / high`
+- `Service Tier`：`default / priority / flex / fast`
+- `Wire API`：`responses`（官方默认）或 `chat`（仅支持 Chat Completions 的中转）
+- `Context Window`：`model_context_window`
+
+`Pi` 扩展字段：
+
+- `API Type`：`openai-completions` / `openai-responses` / `anthropic-messages` / `google-generative-ai`
+- `Context Window`：默认 `128000`
+- `Max Tokens`：`models[].maxTokens`
+- `Reasoning`：是否按推理模型处理（默认 `true`）
+- `Max Tokens Field` / `Supports Developer Role` / `Supports Reasoning Effort` / `Supports Usage In Streaming`：写入 provider `compat`
+
+全局供应商表单是字段并集：保存后同步到各 CLI，目标端只消费自己认识的字段。
 
 ## 默认行为
 

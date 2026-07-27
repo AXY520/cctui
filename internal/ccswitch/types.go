@@ -74,16 +74,39 @@ func (p Provider) Clone() Provider {
 	return clone
 }
 
+// ProviderInput 是表单/同步用的供应商字段并集。
+// 各 CLI 只会消费自己认识的字段；全局 fan-out 时按目标应用各取所需。
 type ProviderInput struct {
-	Name            string
-	BaseURL         string
-	APIKey          string
-	Model           string
-	APIType         string // Pi: openai-completions / openai-responses / anthropic-messages / google-generative-ai
-	ContextWindow   int    // Pi model context window; 0 means default 128000
-	ReasoningEffort string
-	Website         string
-	Notes           string
+	Name    string
+	BaseURL string
+	APIKey  string
+	Model   string
+
+	// Claude
+	ReasoningModel string // ANTHROPIC_REASONING_MODEL
+	HaikuModel     string // ANTHROPIC_DEFAULT_HAIKU_MODEL / SMALL_FAST；空则跟 Model
+
+	// Codex
+	ReasoningEffort  string // model_reasoning_effort
+	ReasoningSummary string // model_reasoning_summary
+	ModelVerbosity   string // model_verbosity
+	ServiceTier      string // service_tier
+	WireAPI          string // model_providers.*.wire_api: responses|chat
+
+	// Pi
+	APIType                  string // openai-completions / openai-responses / anthropic-messages / google-generative-ai
+	MaxTokens                int    // models[].maxTokens；0 表示不写
+	Reasoning                string // models[].reasoning: true|false；空默认 true
+	MaxTokensField           string // compat.maxTokensField
+	SupportsDeveloperRole    string // compat.supportsDeveloperRole: true|false|""
+	SupportsReasoningEffort  string // compat.supportsReasoningEffort
+	SupportsUsageInStreaming string // compat.supportsUsageInStreaming
+
+	// Codex + Pi
+	ContextWindow int // Codex: model_context_window；Pi: models[].contextWindow；0 对 Pi 表示默认 128000，对 Codex 表示不写
+
+	Website string
+	Notes   string
 }
 
 type Snapshot struct {

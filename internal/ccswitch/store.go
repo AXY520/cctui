@@ -584,13 +584,27 @@ func (s *Store) ExtractInput(app AppType, provider Provider) ProviderInput {
 	case AppGlobal:
 		settings := provider.SettingsConfig
 		return ProviderInput{
-			Name:            provider.Name,
-			BaseURL:         stringValue(settings["base_url"]),
-			APIKey:          stringValue(settings["api_key"]),
-			Model:           stringValue(settings["model"]),
-			ReasoningEffort: stringValue(settings["reasoning_effort"]),
-			Website:         deref(provider.WebsiteURL),
-			Notes:           deref(provider.Notes),
+			Name:                     provider.Name,
+			BaseURL:                  stringValue(settings["base_url"]),
+			APIKey:                   stringValue(settings["api_key"]),
+			Model:                    stringValue(settings["model"]),
+			ReasoningModel:           stringValue(settings["reasoning_model"]),
+			HaikuModel:               stringValue(settings["haiku_model"]),
+			ReasoningEffort:          stringValue(settings["reasoning_effort"]),
+			ReasoningSummary:         stringValue(settings["reasoning_summary"]),
+			ModelVerbosity:           stringValue(settings["model_verbosity"]),
+			ServiceTier:              stringValue(settings["service_tier"]),
+			WireAPI:                  stringValue(settings["wire_api"]),
+			APIType:                  stringValue(settings["api_type"]),
+			ContextWindow:            intValue(settings["context_window"]),
+			MaxTokens:                intValue(settings["max_tokens"]),
+			Reasoning:                stringValue(settings["reasoning"]),
+			MaxTokensField:           stringValue(settings["max_tokens_field"]),
+			SupportsDeveloperRole:    stringValue(settings["supports_developer_role"]),
+			SupportsReasoningEffort:  stringValue(settings["supports_reasoning_effort"]),
+			SupportsUsageInStreaming: stringValue(settings["supports_usage_in_streaming"]),
+			Website:                  deref(provider.WebsiteURL),
+			Notes:                    deref(provider.Notes),
 		}
 	case AppClaude:
 		env := getOrCreateMap(provider.SettingsConfig, "env")
@@ -598,32 +612,35 @@ func (s *Store) ExtractInput(app AppType, provider Provider) ProviderInput {
 		if apiKey == "" {
 			apiKey = stringValue(env["ANTHROPIC_API_KEY"])
 		}
-
+		model := firstNonEmpty(
+			stringValue(env["ANTHROPIC_MODEL"]),
+			stringValue(env["ANTHROPIC_DEFAULT_SONNET_MODEL"]),
+			stringValue(env["ANTHROPIC_DEFAULT_OPUS_MODEL"]),
+			stringValue(env["ANTHROPIC_DEFAULT_HAIKU_MODEL"]),
+		)
+		haiku := firstNonEmpty(stringValue(env["ANTHROPIC_DEFAULT_HAIKU_MODEL"]), stringValue(env["ANTHROPIC_SMALL_FAST_MODEL"]))
+		if haiku == model {
+			haiku = ""
+		}
 		return ProviderInput{
-			Name:    provider.Name,
-			BaseURL: stringValue(env["ANTHROPIC_BASE_URL"]),
-			APIKey:  apiKey,
-			Model: firstNonEmpty(
-				stringValue(env["ANTHROPIC_MODEL"]),
-				stringValue(env["ANTHROPIC_DEFAULT_SONNET_MODEL"]),
-				stringValue(env["ANTHROPIC_DEFAULT_HAIKU_MODEL"]),
-				stringValue(env["ANTHROPIC_DEFAULT_OPUS_MODEL"]),
-			),
-			Website: deref(provider.WebsiteURL),
-			Notes:   deref(provider.Notes),
+			Name:           provider.Name,
+			BaseURL:        stringValue(env["ANTHROPIC_BASE_URL"]),
+			APIKey:         apiKey,
+			Model:          model,
+			ReasoningModel: stringValue(env["ANTHROPIC_REASONING_MODEL"]),
+			HaikuModel:     haiku,
+			Website:        deref(provider.WebsiteURL),
+			Notes:          deref(provider.Notes),
 		}
 	case AppCodex:
 		auth := getOrCreateMap(provider.SettingsConfig, "auth")
 		configText := stringValue(provider.SettingsConfig["config"])
-		return ProviderInput{
-			Name:            provider.Name,
-			BaseURL:         extractFirstMatch(baseURLRe, configText),
-			APIKey:          stringValue(auth["OPENAI_API_KEY"]),
-			Model:           extractFirstMatch(modelRe, configText),
-			ReasoningEffort: extractFirstMatch(reasoningEffortRe, configText),
-			Website:         deref(provider.WebsiteURL),
-			Notes:           deref(provider.Notes),
-		}
+		input := extractCodexConfigInput(configText)
+		input.Name = provider.Name
+		input.APIKey = stringValue(auth["OPENAI_API_KEY"])
+		input.Website = deref(provider.WebsiteURL)
+		input.Notes = deref(provider.Notes)
+		return input
 	case AppGemini:
 		env := getOrCreateMap(provider.SettingsConfig, "env")
 		return ProviderInput{
@@ -635,17 +652,7 @@ func (s *Store) ExtractInput(app AppType, provider Provider) ProviderInput {
 			Notes:   deref(provider.Notes),
 		}
 	case AppPi:
-		modelID := firstNonEmpty(stringValue(provider.SettingsConfig["model"]), firstPiModelID(provider.SettingsConfig))
-		return ProviderInput{
-			Name:          provider.Name,
-			BaseURL:       stringValue(provider.SettingsConfig["baseUrl"]),
-			APIKey:        firstNonEmpty(stringValue(provider.SettingsConfig["apiKey"]), piAuthKeyFromSettings(provider.SettingsConfig)),
-			Model:         modelID,
-			APIType:       firstNonEmpty(stringValue(provider.SettingsConfig["api"]), "openai-completions"),
-			ContextWindow: piContextWindowFromSettings(provider.SettingsConfig, modelID),
-			Website:       deref(provider.WebsiteURL),
-			Notes:         deref(provider.Notes),
-		}
+		return extractPiInput(provider)
 	default:
 		return ProviderInput{Name: provider.Name}
 	}
@@ -973,7 +980,21 @@ func (s *Store) buildProvider(app AppType, existing *Provider, input ProviderInp
 		patchStringField(settings, "base_url", input.BaseURL)
 		patchStringField(settings, "api_key", input.APIKey)
 		patchStringField(settings, "model", input.Model)
+		patchStringField(settings, "reasoning_model", input.ReasoningModel)
+		patchStringField(settings, "haiku_model", input.HaikuModel)
 		patchStringField(settings, "reasoning_effort", input.ReasoningEffort)
+		patchStringField(settings, "reasoning_summary", input.ReasoningSummary)
+		patchStringField(settings, "model_verbosity", input.ModelVerbosity)
+		patchStringField(settings, "service_tier", input.ServiceTier)
+		patchStringField(settings, "wire_api", input.WireAPI)
+		patchStringField(settings, "api_type", input.APIType)
+		patchStringField(settings, "reasoning", input.Reasoning)
+		patchStringField(settings, "max_tokens_field", input.MaxTokensField)
+		patchStringField(settings, "supports_developer_role", input.SupportsDeveloperRole)
+		patchStringField(settings, "supports_reasoning_effort", input.SupportsReasoningEffort)
+		patchStringField(settings, "supports_usage_in_streaming", input.SupportsUsageInStreaming)
+		patchPositiveIntField(settings, "context_window", input.ContextWindow)
+		patchPositiveIntField(settings, "max_tokens", input.MaxTokens)
 		provider.SettingsConfig = settings
 
 	case AppClaude:
@@ -998,16 +1019,30 @@ func (s *Store) buildProvider(app AppType, existing *Provider, input ProviderInp
 		patchStringField(env, "ANTHROPIC_BASE_URL", input.BaseURL)
 
 		model := strings.TrimSpace(input.Model)
+		haiku := strings.TrimSpace(input.HaikuModel)
+		reasoningModel := strings.TrimSpace(input.ReasoningModel)
 		if model == "" {
 			delete(env, "ANTHROPIC_MODEL")
 			delete(env, "ANTHROPIC_DEFAULT_HAIKU_MODEL")
 			delete(env, "ANTHROPIC_DEFAULT_SONNET_MODEL")
 			delete(env, "ANTHROPIC_DEFAULT_OPUS_MODEL")
+			delete(env, "ANTHROPIC_SMALL_FAST_MODEL")
 		} else {
 			env["ANTHROPIC_MODEL"] = model
-			env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = model
 			env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = model
 			env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = model
+			if haiku != "" {
+				env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = haiku
+				env["ANTHROPIC_SMALL_FAST_MODEL"] = haiku
+			} else {
+				env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = model
+				env["ANTHROPIC_SMALL_FAST_MODEL"] = model
+			}
+		}
+		if reasoningModel == "" {
+			delete(env, "ANTHROPIC_REASONING_MODEL")
+		} else {
+			env["ANTHROPIC_REASONING_MODEL"] = reasoningModel
 		}
 
 		settings["env"] = env
@@ -1069,6 +1104,8 @@ func (s *Store) buildProvider(app AppType, existing *Provider, input ProviderInp
 		}
 		modelID := strings.TrimSpace(input.Model)
 		contextWindow := normalizePiContextWindow(input.ContextWindow)
+		reasoningEnabled := parseBoolDefault(input.Reasoning, true)
+		maxTokens := input.MaxTokens
 
 		models := []any{}
 		if rawModels, ok := settings["models"].([]any); ok {
@@ -1080,7 +1117,7 @@ func (s *Store) buildProvider(app AppType, existing *Provider, input ProviderInp
 				if modelID == "" || stringValue(modelMap["id"]) == modelID {
 					cloned := CloneMap(modelMap)
 					if modelID != "" && stringValue(cloned["id"]) == modelID {
-						cloned["contextWindow"] = contextWindow
+						applyPiModelFields(cloned, modelID, contextWindow, maxTokens, reasoningEnabled)
 					}
 					models = append(models, cloned)
 				}
@@ -1095,13 +1132,13 @@ func (s *Store) buildProvider(app AppType, existing *Provider, input ProviderInp
 				}
 			}
 			if !found {
-				models = append(models, map[string]any{
-					"id":            modelID,
-					"name":          modelID,
-					"reasoning":     true,
-					"input":         []any{"text"},
-					"contextWindow": contextWindow,
-				})
+				modelMap := map[string]any{
+					"id":    modelID,
+					"name":  modelID,
+					"input": []any{"text"},
+				}
+				applyPiModelFields(modelMap, modelID, contextWindow, maxTokens, reasoningEnabled)
+				models = append(models, modelMap)
 			}
 		}
 
@@ -1112,9 +1149,12 @@ func (s *Store) buildProvider(app AppType, existing *Provider, input ProviderInp
 			"apiKey":        strings.TrimSpace(input.APIKey),
 			"model":         modelID,
 			"contextWindow": contextWindow,
+			"maxTokens":     maxTokens,
+			"reasoning":     boolString(reasoningEnabled),
 			"models":        models,
 		}
-		if compat, ok := settings["compat"]; ok {
+		compat := buildPiCompat(settings, input)
+		if len(compat) > 0 {
 			next["compat"] = compat
 		}
 		if headers, ok := settings["headers"]; ok {
@@ -1499,15 +1539,19 @@ func (s *Store) writePiLive(provider Provider) error {
 	if rawModels, ok := cfg["models"].([]any); ok && len(rawModels) > 0 {
 		entry["models"] = rawModels
 	} else if modelID != "" {
-		entry["models"] = []any{
-			map[string]any{
-				"id":            modelID,
-				"name":          modelID,
-				"reasoning":     true,
-				"input":         []any{"text"},
-				"contextWindow": normalizePiContextWindow(intValue(cfg["contextWindow"])),
-			},
+		modelMap := map[string]any{
+			"id":    modelID,
+			"name":  modelID,
+			"input": []any{"text"},
 		}
+		applyPiModelFields(
+			modelMap,
+			modelID,
+			normalizePiContextWindow(intValue(cfg["contextWindow"])),
+			intValue(cfg["maxTokens"]),
+			parseBoolDefault(stringValue(cfg["reasoning"]), true),
+		)
+		entry["models"] = []any{modelMap}
 	} else {
 		entry["models"] = []any{}
 	}
@@ -1676,6 +1720,185 @@ func piAuthKeyFromSettings(settings map[string]any) string {
 	return stringValue(authMap["key"])
 }
 
+func extractPiInput(provider Provider) ProviderInput {
+	modelID := firstNonEmpty(stringValue(provider.SettingsConfig["model"]), firstPiModelID(provider.SettingsConfig))
+	input := ProviderInput{
+		Name:          provider.Name,
+		BaseURL:       stringValue(provider.SettingsConfig["baseUrl"]),
+		APIKey:        firstNonEmpty(stringValue(provider.SettingsConfig["apiKey"]), piAuthKeyFromSettings(provider.SettingsConfig)),
+		Model:         modelID,
+		APIType:       firstNonEmpty(stringValue(provider.SettingsConfig["api"]), "openai-completions"),
+		ContextWindow: piContextWindowFromSettings(provider.SettingsConfig, modelID),
+		MaxTokens:     piMaxTokensFromSettings(provider.SettingsConfig, modelID),
+		Reasoning:     piReasoningFromSettings(provider.SettingsConfig, modelID),
+		Website:       deref(provider.WebsiteURL),
+		Notes:         deref(provider.Notes),
+	}
+	compat := map[string]any{}
+	if raw, ok := provider.SettingsConfig["compat"].(map[string]any); ok && raw != nil {
+		compat = raw
+	}
+	input.MaxTokensField = stringValue(compat["maxTokensField"])
+	input.SupportsDeveloperRole = triStateFromAny(compat["supportsDeveloperRole"])
+	input.SupportsReasoningEffort = triStateFromAny(compat["supportsReasoningEffort"])
+	input.SupportsUsageInStreaming = triStateFromAny(compat["supportsUsageInStreaming"])
+	return input
+}
+
+func applyPiModelFields(modelMap map[string]any, modelID string, contextWindow, maxTokens int, reasoning bool) {
+	if modelMap == nil {
+		return
+	}
+	modelMap["id"] = modelID
+	if stringValue(modelMap["name"]) == "" {
+		modelMap["name"] = modelID
+	}
+	modelMap["contextWindow"] = contextWindow
+	modelMap["reasoning"] = reasoning
+	if maxTokens > 0 {
+		modelMap["maxTokens"] = maxTokens
+	} else {
+		delete(modelMap, "maxTokens")
+	}
+	if _, ok := modelMap["input"]; !ok {
+		modelMap["input"] = []any{"text"}
+	}
+}
+
+func buildPiCompat(existing map[string]any, input ProviderInput) map[string]any {
+	compat := map[string]any{}
+	if raw, ok := existing["compat"].(map[string]any); ok && raw != nil {
+		compat = CloneMap(raw)
+	}
+	setTriStateCompat(compat, "maxTokensField", strings.TrimSpace(input.MaxTokensField), false)
+	setTriStateCompat(compat, "supportsDeveloperRole", strings.TrimSpace(input.SupportsDeveloperRole), true)
+	setTriStateCompat(compat, "supportsReasoningEffort", strings.TrimSpace(input.SupportsReasoningEffort), true)
+	setTriStateCompat(compat, "supportsUsageInStreaming", strings.TrimSpace(input.SupportsUsageInStreaming), true)
+	if len(compat) == 0 {
+		return nil
+	}
+	return compat
+}
+
+func setTriStateCompat(compat map[string]any, key, value string, asBool bool) {
+	if compat == nil {
+		return
+	}
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		delete(compat, key)
+		return
+	}
+	if !asBool {
+		compat[key] = trimmed
+		return
+	}
+	switch strings.ToLower(trimmed) {
+	case "true", "1", "yes", "on":
+		compat[key] = true
+	case "false", "0", "no", "off":
+		compat[key] = false
+	default:
+		compat[key] = trimmed
+	}
+}
+
+func piMaxTokensFromSettings(settings map[string]any, modelID string) int {
+	if value := intValue(settings["maxTokens"]); value > 0 {
+		return value
+	}
+	if model := piModelMap(settings, modelID); model != nil {
+		return intValue(model["maxTokens"])
+	}
+	return 0
+}
+
+func piReasoningFromSettings(settings map[string]any, modelID string) string {
+	if value := strings.TrimSpace(stringValue(settings["reasoning"])); value != "" {
+		return boolString(parseBoolDefault(value, true))
+	}
+	if model := piModelMap(settings, modelID); model != nil {
+		if raw, ok := model["reasoning"]; ok {
+			return boolString(parseBoolDefault(fmt.Sprint(raw), true))
+		}
+	}
+	return "true"
+}
+
+func piModelMap(settings map[string]any, modelID string) map[string]any {
+	raw, ok := settings["models"]
+	if !ok {
+		return nil
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	modelID = strings.TrimSpace(modelID)
+	for _, item := range list {
+		modelMap, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if modelID == "" || stringValue(modelMap["id"]) == modelID {
+			return modelMap
+		}
+	}
+	return nil
+}
+
+func parseBoolDefault(value string, defaultValue bool) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "":
+		return defaultValue
+	case "true", "1", "yes", "on":
+		return true
+	case "false", "0", "no", "off":
+		return false
+	default:
+		return defaultValue
+	}
+}
+
+func boolString(value bool) string {
+	if value {
+		return "true"
+	}
+	return "false"
+}
+
+func triStateFromAny(value any) string {
+	switch typed := value.(type) {
+	case nil:
+		return ""
+	case bool:
+		return boolString(typed)
+	default:
+		text := strings.ToLower(strings.TrimSpace(fmt.Sprint(typed)))
+		switch text {
+		case "", "<nil>":
+			return ""
+		case "true", "1", "yes", "on":
+			return "true"
+		case "false", "0", "no", "off":
+			return "false"
+		default:
+			return strings.TrimSpace(fmt.Sprint(typed))
+		}
+	}
+}
+
+func patchPositiveIntField(target map[string]any, key string, value int) {
+	if target == nil {
+		return
+	}
+	if value <= 0 {
+		delete(target, key)
+		return
+	}
+	target[key] = value
+}
+
 func firstPiModelID(settings map[string]any) string {
 	raw, ok := settings["models"]
 	if !ok {
@@ -1758,18 +1981,21 @@ func intValue(value any) int {
 
 func patchCodexConfig(existing string, input ProviderInput) (string, error) {
 	trimmed := strings.TrimSpace(existing)
+	wireAPI := normalizeCodexWireAPI(input.WireAPI)
+
 	if trimmed == "" {
-		if strings.TrimSpace(input.BaseURL) == "" && strings.TrimSpace(input.Model) == "" && strings.TrimSpace(input.ReasoningEffort) == "" {
+		if strings.TrimSpace(input.BaseURL) == "" &&
+			strings.TrimSpace(input.Model) == "" &&
+			strings.TrimSpace(input.ReasoningEffort) == "" &&
+			strings.TrimSpace(input.ReasoningSummary) == "" &&
+			strings.TrimSpace(input.ModelVerbosity) == "" &&
+			strings.TrimSpace(input.ServiceTier) == "" &&
+			input.ContextWindow <= 0 {
 			return "", nil
 		}
 
 		doc := map[string]any{}
-		if strings.TrimSpace(input.Model) != "" {
-			doc["model"] = strings.TrimSpace(input.Model)
-		}
-		if strings.TrimSpace(input.ReasoningEffort) != "" {
-			doc["model_reasoning_effort"] = strings.TrimSpace(input.ReasoningEffort)
-		}
+		applyCodexTopLevelFields(doc, input)
 		if strings.TrimSpace(input.BaseURL) != "" {
 			doc["model_provider"] = "custom"
 			doc["disable_response_storage"] = true
@@ -1777,7 +2003,7 @@ func patchCodexConfig(existing string, input ProviderInput) (string, error) {
 				"custom": map[string]any{
 					"name":                 "custom",
 					"base_url":             strings.TrimSpace(input.BaseURL),
-					"wire_api":             "responses",
+					"wire_api":             wireAPI,
 					"requires_openai_auth": true,
 				},
 			}
@@ -1795,8 +2021,7 @@ func patchCodexConfig(existing string, input ProviderInput) (string, error) {
 		return "", fmt.Errorf("解析 Codex config.toml 失败: %w", err)
 	}
 
-	patchGenericMapString(doc, "model", input.Model)
-	patchGenericMapString(doc, "model_reasoning_effort", input.ReasoningEffort)
+	applyCodexTopLevelFields(doc, input)
 
 	if providerKey, ok := doc["model_provider"].(string); ok && strings.TrimSpace(providerKey) != "" {
 		modelProviders, ok := doc["model_providers"].(map[string]any)
@@ -1814,13 +2039,33 @@ func patchCodexConfig(existing string, input ProviderInput) (string, error) {
 			if _, ok := providerTable["name"]; !ok {
 				providerTable["name"] = providerKey
 			}
-			if _, ok := providerTable["wire_api"]; !ok {
+			// 用户显式选择时覆盖；否则保留原值，没有则默认 responses
+			if strings.TrimSpace(input.WireAPI) != "" {
+				providerTable["wire_api"] = wireAPI
+			} else if _, ok := providerTable["wire_api"]; !ok {
 				providerTable["wire_api"] = "responses"
 			}
 			if _, ok := providerTable["requires_openai_auth"]; !ok {
 				providerTable["requires_openai_auth"] = true
 			}
 		}
+	} else if strings.TrimSpace(input.BaseURL) != "" {
+		doc["model_provider"] = "custom"
+		doc["disable_response_storage"] = true
+		modelProviders, _ := doc["model_providers"].(map[string]any)
+		if modelProviders == nil {
+			modelProviders = map[string]any{}
+			doc["model_providers"] = modelProviders
+		}
+		providerTable, _ := modelProviders["custom"].(map[string]any)
+		if providerTable == nil {
+			providerTable = map[string]any{}
+			modelProviders["custom"] = providerTable
+		}
+		providerTable["name"] = "custom"
+		providerTable["base_url"] = strings.TrimSpace(input.BaseURL)
+		providerTable["wire_api"] = wireAPI
+		providerTable["requires_openai_auth"] = true
 	} else {
 		patchGenericMapString(doc, "base_url", input.BaseURL)
 	}
@@ -1831,6 +2076,68 @@ func patchCodexConfig(existing string, input ProviderInput) (string, error) {
 	}
 
 	return strings.TrimSpace(string(buf)), nil
+}
+
+func applyCodexTopLevelFields(doc map[string]any, input ProviderInput) {
+	patchGenericMapString(doc, "model", input.Model)
+	patchGenericMapString(doc, "model_reasoning_effort", input.ReasoningEffort)
+	patchGenericMapString(doc, "model_reasoning_summary", input.ReasoningSummary)
+	patchGenericMapString(doc, "model_verbosity", input.ModelVerbosity)
+	patchGenericMapString(doc, "service_tier", input.ServiceTier)
+	if input.ContextWindow > 0 {
+		doc["model_context_window"] = input.ContextWindow
+	} else {
+		delete(doc, "model_context_window")
+	}
+}
+
+func normalizeCodexWireAPI(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "responses", "response":
+		return "responses"
+	case "chat", "completions", "chat_completions", "chat-completions", "openai-completions":
+		// 部分中转只认 Chat Completions；Codex 历史字段值是 chat
+		return "chat"
+	default:
+		return strings.TrimSpace(value)
+	}
+}
+
+func extractCodexConfigInput(configText string) ProviderInput {
+	input := ProviderInput{}
+	if strings.TrimSpace(configText) == "" {
+		return input
+	}
+	doc := map[string]any{}
+	if err := toml.Unmarshal([]byte(configText), &doc); err != nil {
+		// 回退正则，兼容脏配置
+		input.BaseURL = extractFirstMatch(baseURLRe, configText)
+		input.Model = extractFirstMatch(modelRe, configText)
+		input.ReasoningEffort = extractFirstMatch(reasoningEffortRe, configText)
+		return input
+	}
+	input.Model = stringValue(doc["model"])
+	input.ReasoningEffort = stringValue(doc["model_reasoning_effort"])
+	input.ReasoningSummary = stringValue(doc["model_reasoning_summary"])
+	input.ModelVerbosity = stringValue(doc["model_verbosity"])
+	input.ServiceTier = stringValue(doc["service_tier"])
+	input.ContextWindow = intValue(doc["model_context_window"])
+
+	if providerKey := strings.TrimSpace(stringValue(doc["model_provider"])); providerKey != "" {
+		if modelProviders, ok := doc["model_providers"].(map[string]any); ok {
+			if providerTable, ok := modelProviders[providerKey].(map[string]any); ok && providerTable != nil {
+				input.BaseURL = stringValue(providerTable["base_url"])
+				input.WireAPI = stringValue(providerTable["wire_api"])
+			}
+		}
+	}
+	if input.BaseURL == "" {
+		input.BaseURL = extractFirstMatch(baseURLRe, configText)
+	}
+	if input.WireAPI == "" {
+		input.WireAPI = "responses"
+	}
+	return input
 }
 
 func parseEnvFile(content string) map[string]string {

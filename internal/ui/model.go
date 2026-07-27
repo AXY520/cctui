@@ -112,11 +112,68 @@ var reasoningEffortOptions = []string{
 	"xhigh",
 }
 
+var reasoningSummaryOptions = []string{
+	"",
+	"auto",
+	"concise",
+	"detailed",
+	"none",
+}
+
+var modelVerbosityOptions = []string{
+	"",
+	"low",
+	"medium",
+	"high",
+}
+
+var serviceTierOptions = []string{
+	"",
+	"default",
+	"priority",
+	"flex",
+	"fast",
+}
+
+var wireAPIOptions = []string{
+	"responses",
+	"chat",
+}
+
 var piAPITypeOptions = []string{
 	"openai-completions",
 	"openai-responses",
 	"anthropic-messages",
 	"google-generative-ai",
+}
+
+var piReasoningOptions = []string{
+	"true",
+	"false",
+}
+
+var triStateOptions = []string{
+	"",
+	"true",
+	"false",
+}
+
+var maxTokensFieldOptions = []string{
+	"",
+	"max_tokens",
+	"max_completion_tokens",
+}
+
+// selectFieldsWithDefault 空值在 UI 显示为「默认」
+var selectFieldsWithDefault = map[string]bool{
+	"Reasoning Effort":            true,
+	"Reasoning Summary":           true,
+	"Verbosity":                   true,
+	"Service Tier":                true,
+	"Max Tokens Field":            true,
+	"Supports Developer Role":     true,
+	"Supports Reasoning Effort":   true,
+	"Supports Usage In Streaming": true,
 }
 
 type Model struct {
@@ -501,10 +558,21 @@ func (m *Model) updateModelPicker(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if target < 0 || target >= len(m.form.fields) {
 					target = m.form.modelFieldIndex
 				}
-				// 显示层把空值映射成「默认」，写回时还原为空
-				if m.form.labels[target] == "Reasoning Effort" && (selected == "默认" || selected == "(默认)") {
+				// 显示层把空值映射成「默认」/带说明文案，写回时还原
+				label := ""
+				if target >= 0 && target < len(m.form.labels) {
+					label = m.form.labels[target]
+				}
+				if selected == "默认" || selected == "(默认)" {
 					selected = ""
 				}
+				switch selected {
+				case "responses (推荐)":
+					selected = "responses"
+				case "chat (Chat Completions 中转)":
+					selected = "chat"
+				}
+				_ = label
 				m.form.fields[target].SetValue(selected)
 				m.mode = modeForm
 				m.modelPicker = nil
@@ -1449,43 +1517,10 @@ func (m *Model) renderHelpLines() []string {
 }
 
 func newFormState(app ccswitch.AppType, provider *ccswitch.Provider, input ccswitch.ProviderInput) formState {
-	labels := []string{
-		"Name",
-		"Base URL",
-		"API Key",
-		"Model",
-	}
-	values := []string{
-		input.Name,
-		input.BaseURL,
-		input.APIKey,
-		input.Model,
-	}
-
-	if app == ccswitch.AppCodex || app == ccswitch.AppGlobal {
-		labels = append(labels, "Reasoning Effort")
-		values = append(values, input.ReasoningEffort)
-	}
-	if app == ccswitch.AppPi {
-		apiType := input.APIType
-		if apiType == "" {
-			apiType = "openai-completions"
-		}
-		labels = append(labels, "API Type")
-		values = append(values, apiType)
-
-		contextWindow := input.ContextWindow
-		if contextWindow <= 0 {
-			contextWindow = 128000
-		}
-		labels = append(labels, "Context Window")
-		values = append(values, fmt.Sprintf("%d", contextWindow))
-	}
-
-	labels = append(labels, "Website", "Notes")
-	values = append(values, input.Website, input.Notes)
+	labels, values := buildFormFields(app, input)
 
 	fields := make([]textinput.Model, 0, len(labels))
+	modelFieldIndex := 3
 	for index, label := range labels {
 		field := textinput.New()
 		field.SetValue(values[index])
@@ -1494,19 +1529,99 @@ func newFormState(app ccswitch.AppType, provider *ccswitch.Provider, input ccswi
 		field.Width = 72
 		field.Placeholder = placeholderFor(app, label)
 		fields = append(fields, field)
+		if label == "Model" {
+			modelFieldIndex = index
+		}
 	}
 
 	state := formState{
 		app:             app,
 		editMode:        provider != nil,
 		original:        provider,
-		modelFieldIndex: 3,
+		modelFieldIndex: modelFieldIndex,
 		fields:          fields,
 		labels:          labels,
 		focusIndex:      0,
 	}
 	state.syncFocus()
 	return state
+}
+
+func buildFormFields(app ccswitch.AppType, input ccswitch.ProviderInput) ([]string, []string) {
+	labels := []string{"Name", "Base URL", "API Key", "Model"}
+	values := []string{input.Name, input.BaseURL, input.APIKey, input.Model}
+
+	add := func(label, value string) {
+		labels = append(labels, label)
+		values = append(values, value)
+	}
+	intOrEmpty := func(v int) string {
+		if v <= 0 {
+			return ""
+		}
+		return fmt.Sprintf("%d", v)
+	}
+	piContext := input.ContextWindow
+	if piContext <= 0 && (app == ccswitch.AppPi || app == ccswitch.AppGlobal) {
+		// Pi 默认展示 128000；全局也给个可改的默认值方便同步
+		if app == ccswitch.AppPi {
+			piContext = 128000
+		}
+	}
+	reasoning := strings.TrimSpace(input.Reasoning)
+	if reasoning == "" && (app == ccswitch.AppPi || app == ccswitch.AppGlobal) {
+		reasoning = "true"
+	}
+	apiType := strings.TrimSpace(input.APIType)
+	if apiType == "" && (app == ccswitch.AppPi || app == ccswitch.AppGlobal) {
+		apiType = "openai-completions"
+	}
+	wireAPI := strings.TrimSpace(input.WireAPI)
+	if wireAPI == "" && (app == ccswitch.AppCodex || app == ccswitch.AppGlobal) {
+		wireAPI = "responses"
+	}
+
+	switch app {
+	case ccswitch.AppClaude:
+		add("Reasoning Model", input.ReasoningModel)
+		add("Haiku/Fast Model", input.HaikuModel)
+	case ccswitch.AppCodex:
+		add("Reasoning Effort", input.ReasoningEffort)
+		add("Reasoning Summary", input.ReasoningSummary)
+		add("Verbosity", input.ModelVerbosity)
+		add("Service Tier", input.ServiceTier)
+		add("Wire API", wireAPI)
+		add("Context Window", intOrEmpty(input.ContextWindow))
+	case ccswitch.AppPi:
+		add("API Type", apiType)
+		add("Context Window", fmt.Sprintf("%d", piContext))
+		add("Max Tokens", intOrEmpty(input.MaxTokens))
+		add("Reasoning", reasoning)
+		add("Max Tokens Field", input.MaxTokensField)
+		add("Supports Developer Role", input.SupportsDeveloperRole)
+		add("Supports Reasoning Effort", input.SupportsReasoningEffort)
+		add("Supports Usage In Streaming", input.SupportsUsageInStreaming)
+	case ccswitch.AppGlobal:
+		add("Reasoning Effort", input.ReasoningEffort)
+		add("Reasoning Summary", input.ReasoningSummary)
+		add("Verbosity", input.ModelVerbosity)
+		add("Service Tier", input.ServiceTier)
+		add("Wire API", wireAPI)
+		add("Context Window", intOrEmpty(input.ContextWindow))
+		add("Max Tokens", intOrEmpty(input.MaxTokens))
+		add("API Type", apiType)
+		add("Reasoning", reasoning)
+		add("Reasoning Model", input.ReasoningModel)
+		add("Haiku/Fast Model", input.HaikuModel)
+		add("Max Tokens Field", input.MaxTokensField)
+		add("Supports Developer Role", input.SupportsDeveloperRole)
+		add("Supports Reasoning Effort", input.SupportsReasoningEffort)
+		add("Supports Usage In Streaming", input.SupportsUsageInStreaming)
+	}
+
+	add("Website", input.Website)
+	add("Notes", input.Notes)
+	return labels, values
 }
 
 func (m *Model) syncFormFocus() {
@@ -1528,36 +1643,49 @@ func (f *formState) syncFocus() {
 }
 
 func (m *Model) formInput() ccswitch.ProviderInput {
-	field := func(index int) string {
-		if index >= 0 && index < len(m.form.fields) {
-			return strings.TrimSpace(m.form.fields[index].Value())
+	val := func(label string) string {
+		for index, name := range m.form.labels {
+			if name == label && index < len(m.form.fields) {
+				return strings.TrimSpace(m.form.fields[index].Value())
+			}
 		}
 		return ""
 	}
-
-	input := ccswitch.ProviderInput{
-		Name:    field(0),
-		BaseURL: field(1),
-		APIKey:  field(2),
-		Model:   field(3),
-	}
-
-	next := 4
-	if m.form.app == ccswitch.AppCodex || m.form.app == ccswitch.AppGlobal {
-		input.ReasoningEffort = field(next)
-		next++
-	}
-	if m.form.app == ccswitch.AppPi {
-		input.APIType = field(next)
-		next++
-		if n, err := strconv.Atoi(field(next)); err == nil {
-			input.ContextWindow = n
+	intVal := func(label string) int {
+		text := val(label)
+		if text == "" {
+			return 0
 		}
-		next++
+		n, err := strconv.Atoi(text)
+		if err != nil {
+			return 0
+		}
+		return n
 	}
-	input.Website = field(next)
-	input.Notes = field(next + 1)
-	return input
+
+	return ccswitch.ProviderInput{
+		Name:                     val("Name"),
+		BaseURL:                  val("Base URL"),
+		APIKey:                   val("API Key"),
+		Model:                    val("Model"),
+		ReasoningModel:           val("Reasoning Model"),
+		HaikuModel:               val("Haiku/Fast Model"),
+		ReasoningEffort:          val("Reasoning Effort"),
+		ReasoningSummary:         val("Reasoning Summary"),
+		ModelVerbosity:           val("Verbosity"),
+		ServiceTier:              val("Service Tier"),
+		WireAPI:                  val("Wire API"),
+		APIType:                  val("API Type"),
+		ContextWindow:            intVal("Context Window"),
+		MaxTokens:                intVal("Max Tokens"),
+		Reasoning:                val("Reasoning"),
+		MaxTokensField:           val("Max Tokens Field"),
+		SupportsDeveloperRole:    val("Supports Developer Role"),
+		SupportsReasoningEffort:  val("Supports Reasoning Effort"),
+		SupportsUsageInStreaming: val("Supports Usage In Streaming"),
+		Website:                  val("Website"),
+		Notes:                    val("Notes"),
+	}
 }
 
 func (m *Model) openListPicker(title string, items []string, targetField int) {
@@ -1567,10 +1695,22 @@ func (m *Model) openListPicker(title string, items []string, targetField int) {
 	if targetField >= 0 && targetField < len(m.form.fields) {
 		current = strings.TrimSpace(m.form.fields[targetField].Value())
 	}
+	label := ""
+	if targetField >= 0 && targetField < len(m.form.labels) {
+		label = m.form.labels[targetField]
+	}
 	for i, item := range items {
 		display := item
-		if m.form.labels[targetField] == "Reasoning Effort" && item == "" {
+		if item == "" && selectFieldsWithDefault[label] {
 			display = "默认"
+		}
+		if label == "Wire API" {
+			switch item {
+			case "responses":
+				display = "responses (推荐)"
+			case "chat":
+				display = "chat (Chat Completions 中转)"
+			}
 		}
 		displayItems[i] = display
 		if item == current || (item == "" && current == "") {
@@ -1592,7 +1732,9 @@ func (m *Model) isSelectField(index int) bool {
 		return false
 	}
 	switch m.form.labels[index] {
-	case "Reasoning Effort", "API Type":
+	case "Reasoning Effort", "Reasoning Summary", "Verbosity", "Service Tier",
+		"Wire API", "API Type", "Reasoning", "Max Tokens Field",
+		"Supports Developer Role", "Supports Reasoning Effort", "Supports Usage In Streaming":
 		return true
 	default:
 		return false
@@ -1606,8 +1748,22 @@ func (m *Model) selectOptionsForField(index int) []string {
 	switch m.form.labels[index] {
 	case "Reasoning Effort":
 		return reasoningEffortOptions
+	case "Reasoning Summary":
+		return reasoningSummaryOptions
+	case "Verbosity":
+		return modelVerbosityOptions
+	case "Service Tier":
+		return serviceTierOptions
+	case "Wire API":
+		return wireAPIOptions
 	case "API Type":
 		return piAPITypeOptions
+	case "Reasoning":
+		return piReasoningOptions
+	case "Max Tokens Field":
+		return maxTokensFieldOptions
+	case "Supports Developer Role", "Supports Reasoning Effort", "Supports Usage In Streaming":
+		return triStateOptions
 	default:
 		return nil
 	}
@@ -1664,18 +1820,28 @@ func (m *Model) cycleSelectField(delta int) bool {
 func (m *Model) renderSelectField(index int, field textinput.Model) string {
 	value := strings.TrimSpace(field.Value())
 	display := value
-	if m.form.labels[index] == "Reasoning Effort" && display == "" {
+	label := ""
+	if index >= 0 && index < len(m.form.labels) {
+		label = m.form.labels[index]
+	}
+	if display == "" && selectFieldsWithDefault[label] {
 		display = "默认"
+	}
+	if label == "Wire API" {
+		switch display {
+		case "responses":
+			display = "responses (推荐)"
+		case "chat":
+			display = "chat (Chat Completions 中转)"
+		}
 	}
 	if display == "" {
 		display = "未选择"
 	}
-	hint := mutedStyle.Render("[Enter 选择 · ←/→ 切换]")
-	line := "› " + display + "  " + hint
 	if index == m.form.focusIndex {
 		return selectedStyle.Render("› " + display + "  [Enter 选择 · ←/→ 切换]")
 	}
-	return line
+	return "› " + display + "  " + mutedStyle.Render("[Enter 选择 · ←/→ 切换]")
 }
 
 func help(key, desc string) string {
@@ -1761,7 +1927,7 @@ func (m *Model) providerCount(app ccswitch.AppType) int {
 func (m *Model) formHint() string {
 	switch m.form.app {
 	case ccswitch.AppGlobal:
-		return "保存后会同步到 Claude / Codex / Gemini / Pi，不会自动切换当前供应商"
+		return "保存后按并集同步到各 CLI（只消费各自认识的字段），不会自动切换当前供应商"
 	case ccswitch.AppClaude:
 		return "写入 ~/.claude/settings.json（兼容旧版 claude.json）"
 	case ccswitch.AppCodex:
@@ -1808,9 +1974,29 @@ func placeholderFor(app ccswitch.AppType, label string) string {
 	case "API Type":
 		return "openai-completions / openai-responses / anthropic-messages / google-generative-ai"
 	case "Context Window":
-		return "例如 128000 / 200000"
+		return "例如 128000 / 200000；Codex 留空表示不写"
+	case "Max Tokens":
+		return "例如 8192 / 32000；留空表示不写"
+	case "Reasoning":
+		return "true / false"
+	case "Reasoning Model":
+		return "例如 claude-opus / gpt-5.4；对应 ANTHROPIC_REASONING_MODEL"
+	case "Haiku/Fast Model":
+		return "轻量模型；留空则与 Model 相同"
 	case "Reasoning Effort":
 		return "默认 / minimal / low / medium / high / xhigh"
+	case "Reasoning Summary":
+		return "默认 / auto / concise / detailed / none"
+	case "Verbosity":
+		return "默认 / low / medium / high"
+	case "Service Tier":
+		return "默认 / default / priority / flex / fast"
+	case "Wire API":
+		return "responses（官方）或 chat（仅 Chat Completions 中转）"
+	case "Max Tokens Field":
+		return "默认 / max_tokens / max_completion_tokens"
+	case "Supports Developer Role", "Supports Reasoning Effort", "Supports Usage In Streaming":
+		return "默认 / true / false"
 	case "Website":
 		return "Optional: provider website"
 	case "Notes":
