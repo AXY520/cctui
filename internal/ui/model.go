@@ -293,6 +293,8 @@ func (m *Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.jumpToApp(ccswitch.AppCodex)
 		case "3":
 			m.jumpToApp(ccswitch.AppGemini)
+		case "4":
+			m.jumpToApp(ccswitch.AppPi)
 		case "a":
 			row := m.selectedRow()
 			if row != nil {
@@ -325,7 +327,7 @@ func (m *Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				if row.app == ccswitch.AppGlobal {
-					m.setStatus("全局供应商已同步到各 CLI，请到 Claude/Codex/Gemini 中按 Enter 切换", statusInfo)
+					m.setStatus("全局供应商已同步到各 CLI，请到 Claude/Codex/Gemini/Pi 中按 Enter 切换", statusInfo)
 					return m, nil
 				}
 				if m.current[row.app] == row.provider.ID {
@@ -476,7 +478,7 @@ func (m *Model) fetchModels() tea.Cmd {
 		switch app {
 		case ccswitch.AppClaude:
 			baseURL = "https://api.anthropic.com"
-		case ccswitch.AppCodex:
+		case ccswitch.AppCodex, ccswitch.AppPi, ccswitch.AppGlobal:
 			baseURL = "https://api.openai.com"
 		case ccswitch.AppGemini:
 			baseURL = "https://generativelanguage.googleapis.com"
@@ -615,7 +617,7 @@ func (m *Model) saveForm() (tea.Model, tea.Cmd) {
 		}
 		m.selectedKey = providerKey(m.form.app, updated.ID)
 		if m.form.app == ccswitch.AppGlobal {
-			statusMessage = fmt.Sprintf("已更新全局供应商 %s，并同步到 Claude/Codex/Gemini", updated.Name)
+			statusMessage = fmt.Sprintf("已更新全局供应商 %s，并同步到 Claude/Codex/Gemini/Pi", updated.Name)
 		} else {
 			statusMessage = fmt.Sprintf("已更新 %s", updated.Name)
 		}
@@ -627,7 +629,7 @@ func (m *Model) saveForm() (tea.Model, tea.Cmd) {
 		}
 		m.selectedKey = providerKey(m.form.app, created.ID)
 		if m.form.app == ccswitch.AppGlobal {
-			statusMessage = fmt.Sprintf("已添加全局供应商 %s，并同步到 Claude/Codex/Gemini（未自动切换）", created.Name)
+			statusMessage = fmt.Sprintf("已添加全局供应商 %s，并同步到 Claude/Codex/Gemini/Pi（未自动切换）", created.Name)
 		} else {
 			statusMessage = fmt.Sprintf("已添加 %s", created.Name)
 			if autoSwitched {
@@ -779,7 +781,7 @@ func (m *Model) pingProvider(app ccswitch.AppType, provider ccswitch.Provider) t
 		switch app {
 		case ccswitch.AppClaude:
 			baseURL = "https://api.anthropic.com"
-		case ccswitch.AppCodex:
+		case ccswitch.AppCodex, ccswitch.AppPi:
 			baseURL = "https://api.openai.com"
 		case ccswitch.AppGemini:
 			baseURL = "https://generativelanguage.googleapis.com"
@@ -1122,7 +1124,7 @@ func (m *Model) viewConfirm() string {
 		body = append(body, providerURLLines(m.store, m.confirm.app, m.confirm.provider, max(24, min(m.width-8, 80)-6))...)
 		body = append(body,
 			"",
-			"将删除该全局模板，并尝试删除 Claude/Codex/Gemini 中的关联副本。",
+			"将删除该全局模板，并尝试删除 Claude/Codex/Gemini/Pi 中的关联副本。",
 			"若某 CLI 正在使用该副本且还有其他供应商，则该副本会保留。",
 			"按 Enter / y 确认，q / n 返回。",
 		)
@@ -1379,7 +1381,7 @@ func (m *Model) renderHelpLines() []string {
 			help("a", "添加"),
 			help("e", "编辑"),
 			help("d", "删除"),
-			help("0/1/2/3", "跳分组"),
+			help("0-4", "跳分组"),
 			help("g/G", "顶/底"),
 			help("q", "退出"),
 		}
@@ -1404,6 +1406,14 @@ func newFormState(app ccswitch.AppType, provider *ccswitch.Provider, input ccswi
 	if app == ccswitch.AppCodex || app == ccswitch.AppGlobal {
 		labels = append(labels, "Reasoning Effort")
 		values = append(values, input.ReasoningEffort)
+	}
+	if app == ccswitch.AppPi {
+		apiType := input.APIType
+		if apiType == "" {
+			apiType = "openai-completions"
+		}
+		labels = append(labels, "API Type")
+		values = append(values, apiType)
 	}
 
 	labels = append(labels, "Website", "Notes")
@@ -1469,6 +1479,10 @@ func (m *Model) formInput() ccswitch.ProviderInput {
 	next := 4
 	if m.form.app == ccswitch.AppCodex || m.form.app == ccswitch.AppGlobal {
 		input.ReasoningEffort = field(next)
+		next++
+	}
+	if m.form.app == ccswitch.AppPi {
+		input.APIType = field(next)
 		next++
 	}
 	input.Website = field(next)
@@ -1559,13 +1573,15 @@ func (m *Model) providerCount(app ccswitch.AppType) int {
 func (m *Model) formHint() string {
 	switch m.form.app {
 	case ccswitch.AppGlobal:
-		return "保存后会同步到 Claude / Codex / Gemini，不会自动切换当前供应商"
+		return "保存后会同步到 Claude / Codex / Gemini / Pi，不会自动切换当前供应商"
 	case ccswitch.AppClaude:
 		return "写入 ~/.claude/settings.json（兼容旧版 claude.json）"
 	case ccswitch.AppCodex:
 		return "写入 ~/.codex/auth.json 与 ~/.codex/config.toml"
 	case ccswitch.AppGemini:
 		return "写入 ~/.gemini/.env 与 ~/.gemini/settings.json"
+	case ccswitch.AppPi:
+		return "写入 ~/.pi/agent/models.json、auth.json、settings.json（切换时设置 defaultProvider）"
 	default:
 		return "写入对应 CLI 的 live 配置"
 	}
@@ -1581,7 +1597,7 @@ func placeholderFor(app ccswitch.AppType, label string) string {
 			return "例如 https://api.example.com 或带 /v1 的网关地址"
 		case ccswitch.AppClaude:
 			return "例如 https://api.anthropic.com"
-		case ccswitch.AppCodex:
+		case ccswitch.AppCodex, ccswitch.AppPi:
 			return "例如 https://api.openai.com/v1"
 		case ccswitch.AppGemini:
 			return "例如 https://generativelanguage.googleapis.com"
@@ -1598,7 +1614,11 @@ func placeholderFor(app ccswitch.AppType, label string) string {
 			return "例如 gpt-5-codex"
 		case ccswitch.AppGemini:
 			return "例如 gemini-2.5-pro"
+		case ccswitch.AppPi:
+			return "例如 mimo-v2.5-pro / gpt-5"
 		}
+	case "API Type":
+		return "openai-completions / openai-responses / anthropic-messages / google-generative-ai"
 	case "Reasoning Effort":
 		return "e.g. medium / high"
 	case "Website":
@@ -1633,6 +1653,8 @@ func providerBaseURLFallback(app ccswitch.AppType) string {
 		return "官方登录"
 	case ccswitch.AppGemini:
 		return "Google OAuth"
+	case ccswitch.AppPi:
+		return "未设置 Base URL"
 	default:
 		return "-"
 	}

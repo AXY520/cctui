@@ -523,8 +523,13 @@ func (s *Store) SwitchProvider(app AppType, id string) error {
 	}
 
 	if current != "" {
-		if liveSettings, err := s.readLiveSettings(app); err == nil {
-			if existing, err := s.GetProvider(app, current); err == nil && existing != nil {
+		if existing, err := s.GetProvider(app, current); err == nil && existing != nil {
+			if app == AppPi {
+				if liveSettings, err := s.readPiProviderLive(*existing); err == nil {
+					existing.SettingsConfig = liveSettings
+					_ = s.saveProviderRow(app, *existing)
+				}
+			} else if liveSettings, err := s.readLiveSettings(app); err == nil {
 				existing.SettingsConfig = liveSettings
 				_ = s.saveProviderRow(app, *existing)
 			}
@@ -628,6 +633,16 @@ func (s *Store) ExtractInput(app AppType, provider Provider) ProviderInput {
 			Website: deref(provider.WebsiteURL),
 			Notes:   deref(provider.Notes),
 		}
+	case AppPi:
+		return ProviderInput{
+			Name:    provider.Name,
+			BaseURL: stringValue(provider.SettingsConfig["baseUrl"]),
+			APIKey:  firstNonEmpty(stringValue(provider.SettingsConfig["apiKey"]), piAuthKeyFromSettings(provider.SettingsConfig)),
+			Model:   firstNonEmpty(stringValue(provider.SettingsConfig["model"]), firstPiModelID(provider.SettingsConfig)),
+			APIType: firstNonEmpty(stringValue(provider.SettingsConfig["api"]), "openai-completions"),
+			Website: deref(provider.WebsiteURL),
+			Notes:   deref(provider.Notes),
+		}
 	default:
 		return ProviderInput{Name: provider.Name}
 	}
@@ -660,6 +675,12 @@ func (s *Store) EndpointSummary(app AppType, provider Provider) string {
 		baseURL := strings.TrimSpace(stringValue(env["GOOGLE_GEMINI_BASE_URL"]))
 		if baseURL == "" {
 			return "Google OAuth"
+		}
+		return summarizeURL(baseURL)
+	case AppPi:
+		baseURL := strings.TrimSpace(stringValue(provider.SettingsConfig["baseUrl"]))
+		if baseURL == "" {
+			return "未设置 Base URL"
 		}
 		return summarizeURL(baseURL)
 	default:
@@ -707,6 +728,10 @@ func (s *Store) ensureSchema() error {
 }
 
 func (s *Store) importCurrentLive(app AppType) (bool, error) {
+	if app == AppPi {
+		return s.importPiLiveProviders()
+	}
+
 	live, err := s.readLiveSettings(app)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -735,6 +760,77 @@ func (s *Store) importCurrentLive(app AppType) (bool, error) {
 	}
 
 	return true, nil
+}
+
+func (s *Store) importPiLiveProviders() (bool, error) {
+	providersDoc, err := s.readPiModelsFile()
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	providersMap := getOrCreateMap(providersDoc, "providers")
+	if len(providersMap) == 0 {
+		return false, nil
+	}
+
+	authDoc, _ := s.readPiAuthFile()
+	settingsDoc, _ := s.readPiSettingsFile()
+	defaultProvider := stringValue(settingsDoc["defaultProvider"])
+	defaultModel := stringValue(settingsDoc["defaultModel"])
+
+	var (
+		importedAny bool
+		currentID   string
+		index       int64
+	)
+	now := time.Now().UnixMilli()
+	existing, err := s.ListProviders(AppPi)
+	if err != nil {
+		return false, err
+	}
+
+	names := make([]string, 0, len(providersMap))
+	for name := range providersMap {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+
+	for _, providerID := range names {
+		raw := providersMap[providerID]
+		entry, ok := raw.(map[string]any)
+		if !ok || entry == nil {
+			continue
+		}
+		cfg := buildPiSettingsConfig(providerID, entry, authDoc, defaultModel)
+		id := uniqueProviderID(providerID, existing, AppPi)
+		sortIndex := index
+		provider := Provider{
+			ID:             id,
+			Name:           providerID,
+			SettingsConfig: cfg,
+			CreatedAt:      &now,
+			SortIndex:      &sortIndex,
+			Meta:           map[string]any{"piProviderId": providerID},
+		}
+		if err := s.saveProviderRow(AppPi, provider); err != nil {
+			return importedAny, err
+		}
+		existing = append(existing, provider)
+		importedAny = true
+		if currentID == "" || providerID == defaultProvider {
+			currentID = id
+		}
+		index++
+	}
+
+	if currentID != "" {
+		if err := s.setCurrentProvider(AppPi, currentID); err != nil {
+			return importedAny, err
+		}
+	}
+	return importedAny, nil
 }
 
 func (s *Store) saveProviderRow(app AppType, provider Provider) error {
@@ -954,6 +1050,68 @@ func (s *Store) buildProvider(app AppType, existing *Provider, input ProviderInp
 		}
 		settings["config"] = configDoc
 		provider.SettingsConfig = settings
+
+	case AppPi:
+		settings := CloneMap(provider.SettingsConfig)
+		providerID := strings.TrimSpace(stringValue(settings["providerId"]))
+		if providerID == "" {
+			providerID = slugify(input.Name)
+		}
+		if providerID == "" {
+			providerID = "custom"
+		}
+		apiType := strings.TrimSpace(input.APIType)
+		if apiType == "" {
+			apiType = firstNonEmpty(stringValue(settings["api"]), "openai-completions")
+		}
+		modelID := strings.TrimSpace(input.Model)
+
+		models := []any{}
+		if rawModels, ok := settings["models"].([]any); ok {
+			for _, item := range rawModels {
+				modelMap, ok := item.(map[string]any)
+				if !ok {
+					continue
+				}
+				if modelID == "" || stringValue(modelMap["id"]) == modelID {
+					models = append(models, CloneMap(modelMap))
+				}
+			}
+		}
+		if modelID != "" {
+			found := false
+			for _, item := range models {
+				if modelMap, ok := item.(map[string]any); ok && stringValue(modelMap["id"]) == modelID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				models = append(models, map[string]any{
+					"id":            modelID,
+					"name":          modelID,
+					"reasoning":     true,
+					"input":         []any{"text"},
+					"contextWindow": 128000,
+				})
+			}
+		}
+
+		next := map[string]any{
+			"providerId": providerID,
+			"baseUrl":    strings.TrimSpace(input.BaseURL),
+			"api":        apiType,
+			"apiKey":     strings.TrimSpace(input.APIKey),
+			"model":      modelID,
+			"models":     models,
+		}
+		if compat, ok := settings["compat"]; ok {
+			next["compat"] = compat
+		}
+		if headers, ok := settings["headers"]; ok {
+			next["headers"] = headers
+		}
+		provider.SettingsConfig = next
 	}
 
 	return provider, nil
@@ -1046,6 +1204,45 @@ func (s *Store) readLiveSettings(app AppType) (map[string]any, error) {
 		}
 
 		return result, nil
+
+	case AppPi:
+		settingsDoc, err := s.readPiSettingsFile()
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		modelsDoc, err := s.readPiModelsFile()
+		if err != nil {
+			return nil, err
+		}
+		providersMap := getOrCreateMap(modelsDoc, "providers")
+		if len(providersMap) == 0 {
+			return nil, os.ErrNotExist
+		}
+		providerID := ""
+		if settingsDoc != nil {
+			providerID = stringValue(settingsDoc["defaultProvider"])
+		}
+		if providerID == "" || providersMap[providerID] == nil {
+			names := make([]string, 0, len(providersMap))
+			for name := range providersMap {
+				names = append(names, name)
+			}
+			slices.Sort(names)
+			if len(names) == 0 {
+				return nil, os.ErrNotExist
+			}
+			providerID = names[0]
+		}
+		entry, _ := providersMap[providerID].(map[string]any)
+		if entry == nil {
+			return nil, os.ErrNotExist
+		}
+		authDoc, _ := s.readPiAuthFile()
+		defaultModel := ""
+		if settingsDoc != nil {
+			defaultModel = stringValue(settingsDoc["defaultModel"])
+		}
+		return buildPiSettingsConfig(providerID, entry, authDoc, defaultModel), nil
 	}
 
 	return nil, fmt.Errorf("不支持的应用类型: %s", app)
@@ -1064,6 +1261,8 @@ func (s *Store) writeLiveSettings(app AppType, provider Provider) error {
 		return writeCodexLiveAtomic(s.codexAuthPath(), s.codexConfigPath(), auth, config)
 	case AppGemini:
 		return s.writeGeminiLive(provider)
+	case AppPi:
+		return s.writePiLive(provider)
 	default:
 		return fmt.Errorf("不支持的应用类型: %s", app)
 	}
@@ -1144,6 +1343,22 @@ func (s *Store) geminiSettingsPath() string {
 	return filepath.Join(s.configDirFor(AppGemini), "settings.json")
 }
 
+func (s *Store) piAgentDir() string {
+	return s.configDirFor(AppPi)
+}
+
+func (s *Store) piModelsPath() string {
+	return filepath.Join(s.piAgentDir(), "models.json")
+}
+
+func (s *Store) piAuthPath() string {
+	return filepath.Join(s.piAgentDir(), "auth.json")
+}
+
+func (s *Store) piSettingsPath() string {
+	return filepath.Join(s.piAgentDir(), "settings.json")
+}
+
 func (s *Store) configDirFor(app AppType) string {
 	key := configDirKey(app)
 	if custom := strings.TrimSpace(s.settings.getString(key)); custom != "" {
@@ -1157,6 +1372,8 @@ func (s *Store) configDirFor(app AppType) string {
 		return filepath.Join(homeDir(), ".codex")
 	case AppGemini:
 		return filepath.Join(homeDir(), ".gemini")
+	case AppPi:
+		return filepath.Join(homeDir(), ".pi", "agent")
 	default:
 		return homeDir()
 	}
@@ -1217,6 +1434,8 @@ func currentProviderKey(app AppType) string {
 		return "currentProviderCodex"
 	case AppGemini:
 		return "currentProviderGemini"
+	case AppPi:
+		return "currentProviderPi"
 	default:
 		return ""
 	}
@@ -1230,9 +1449,237 @@ func configDirKey(app AppType) string {
 		return "codexConfigDir"
 	case AppGemini:
 		return "geminiConfigDir"
+	case AppPi:
+		return "piConfigDir"
 	default:
 		return ""
 	}
+}
+
+func (s *Store) writePiLive(provider Provider) error {
+	cfg := provider.SettingsConfig
+	providerID := strings.TrimSpace(stringValue(cfg["providerId"]))
+	if providerID == "" {
+		providerID = slugify(provider.Name)
+	}
+	if providerID == "" {
+		return fmt.Errorf("Pi providerId 不能为空")
+	}
+
+	baseURL := strings.TrimSpace(stringValue(cfg["baseUrl"]))
+	apiType := firstNonEmpty(strings.TrimSpace(stringValue(cfg["api"])), "openai-completions")
+	apiKey := strings.TrimSpace(stringValue(cfg["apiKey"]))
+	modelID := strings.TrimSpace(stringValue(cfg["model"]))
+
+	modelsDoc, err := s.readPiModelsFile()
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if modelsDoc == nil {
+		modelsDoc = map[string]any{}
+	}
+	providersMap := getOrCreateMap(modelsDoc, "providers")
+
+	entry := map[string]any{
+		"baseUrl": baseURL,
+		"api":     apiType,
+	}
+	if apiKey != "" {
+		entry["apiKey"] = apiKey
+	}
+	if rawModels, ok := cfg["models"].([]any); ok && len(rawModels) > 0 {
+		entry["models"] = rawModels
+	} else if modelID != "" {
+		entry["models"] = []any{
+			map[string]any{
+				"id":            modelID,
+				"name":          modelID,
+				"reasoning":     true,
+				"input":         []any{"text"},
+				"contextWindow": 128000,
+			},
+		}
+	} else {
+		entry["models"] = []any{}
+	}
+	if compat, ok := cfg["compat"]; ok {
+		entry["compat"] = compat
+	}
+	if headers, ok := cfg["headers"]; ok {
+		entry["headers"] = headers
+	}
+	providersMap[providerID] = entry
+	modelsDoc["providers"] = providersMap
+	if err := writeJSONAtomic(s.piModelsPath(), modelsDoc); err != nil {
+		return fmt.Errorf("写入 Pi models.json 失败: %w", err)
+	}
+
+	authDoc, err := s.readPiAuthFile()
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if authDoc == nil {
+		authDoc = map[string]any{}
+	}
+	if apiKey != "" {
+		authDoc[providerID] = map[string]any{
+			"type": "api_key",
+			"key":  apiKey,
+		}
+	}
+	if err := writeJSONFileMode(s.piAuthPath(), authDoc, 0o600); err != nil {
+		return fmt.Errorf("写入 Pi auth.json 失败: %w", err)
+	}
+
+	settingsDoc, err := s.readPiSettingsFile()
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if settingsDoc == nil {
+		settingsDoc = map[string]any{}
+	}
+	settingsDoc["defaultProvider"] = providerID
+	if modelID != "" {
+		settingsDoc["defaultModel"] = modelID
+	}
+	if err := writeJSONAtomic(s.piSettingsPath(), settingsDoc); err != nil {
+		return fmt.Errorf("写入 Pi settings.json 失败: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) readPiProviderLive(existing Provider) (map[string]any, error) {
+	providerID := strings.TrimSpace(stringValue(existing.SettingsConfig["providerId"]))
+	if providerID == "" {
+		providerID = slugify(existing.Name)
+	}
+	modelsDoc, err := s.readPiModelsFile()
+	if err != nil {
+		return nil, err
+	}
+	providersMap := getOrCreateMap(modelsDoc, "providers")
+	entry, _ := providersMap[providerID].(map[string]any)
+	if entry == nil {
+		return nil, os.ErrNotExist
+	}
+	authDoc, _ := s.readPiAuthFile()
+	settingsDoc, _ := s.readPiSettingsFile()
+	modelID := stringValue(existing.SettingsConfig["model"])
+	if settingsDoc != nil && stringValue(settingsDoc["defaultProvider"]) == providerID {
+		if def := stringValue(settingsDoc["defaultModel"]); def != "" {
+			modelID = def
+		}
+	}
+	return buildPiSettingsConfig(providerID, entry, authDoc, modelID), nil
+}
+
+func (s *Store) readPiModelsFile() (map[string]any, error) {
+	return readJSONFileMap(s.piModelsPath())
+}
+
+func (s *Store) readPiAuthFile() (map[string]any, error) {
+	return readJSONFileMap(s.piAuthPath())
+}
+
+func (s *Store) readPiSettingsFile() (map[string]any, error) {
+	return readJSONFileMap(s.piSettingsPath())
+}
+
+func readJSONFileMap(path string) (map[string]any, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(strings.TrimSpace(string(content))) == 0 {
+		return map[string]any{}, nil
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(content, &doc); err != nil {
+		return nil, fmt.Errorf("解析 %s 失败: %w", path, err)
+	}
+	if doc == nil {
+		doc = map[string]any{}
+	}
+	return doc, nil
+}
+
+func writeJSONFileMode(path string, data any, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	buf, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return err
+	}
+	buf = append(buf, '\n')
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, buf, mode); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	_ = os.Chmod(path, mode)
+	return nil
+}
+
+func buildPiSettingsConfig(providerID string, entry map[string]any, authDoc map[string]any, defaultModel string) map[string]any {
+	cfg := map[string]any{
+		"providerId": providerID,
+		"baseUrl":    stringValue(entry["baseUrl"]),
+		"api":        firstNonEmpty(stringValue(entry["api"]), "openai-completions"),
+		"apiKey":     stringValue(entry["apiKey"]),
+		"models":     entry["models"],
+	}
+	if compat, ok := entry["compat"]; ok {
+		cfg["compat"] = compat
+	}
+	if headers, ok := entry["headers"]; ok {
+		cfg["headers"] = headers
+	}
+	if authDoc != nil {
+		if raw, ok := authDoc[providerID]; ok {
+			if authMap, ok := raw.(map[string]any); ok {
+				if key := stringValue(authMap["key"]); key != "" {
+					cfg["apiKey"] = key
+				}
+			}
+		}
+	}
+	modelID := strings.TrimSpace(defaultModel)
+	if modelID == "" {
+		modelID = firstPiModelID(cfg)
+	}
+	cfg["model"] = modelID
+	return cfg
+}
+
+func piAuthKeyFromSettings(settings map[string]any) string {
+	raw, ok := settings["auth"]
+	if !ok {
+		return ""
+	}
+	authMap, ok := raw.(map[string]any)
+	if !ok {
+		return ""
+	}
+	return stringValue(authMap["key"])
+}
+
+func firstPiModelID(settings map[string]any) string {
+	raw, ok := settings["models"]
+	if !ok {
+		return ""
+	}
+	list, ok := raw.([]any)
+	if !ok || len(list) == 0 {
+		return ""
+	}
+	if modelMap, ok := list[0].(map[string]any); ok {
+		return stringValue(modelMap["id"])
+	}
+	return ""
 }
 
 func patchCodexConfig(existing string, input ProviderInput) (string, error) {

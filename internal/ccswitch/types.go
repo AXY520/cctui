@@ -12,13 +12,14 @@ const (
 	AppClaude AppType = "claude"
 	AppCodex  AppType = "codex"
 	AppGemini AppType = "gemini"
+	AppPi     AppType = "pi"
 )
 
 // AllAppTypes 是会读写 live 配置的应用。
-var AllAppTypes = []AppType{AppClaude, AppCodex, AppGemini}
+var AllAppTypes = []AppType{AppClaude, AppCodex, AppGemini, AppPi}
 
 // UIAppTypes 是 TUI 列表展示顺序，全局供应商置顶。
-var UIAppTypes = []AppType{AppGlobal, AppClaude, AppCodex, AppGemini}
+var UIAppTypes = []AppType{AppGlobal, AppClaude, AppCodex, AppGemini, AppPi}
 
 func (a AppType) String() string {
 	return string(a)
@@ -34,6 +35,8 @@ func (a AppType) DisplayName() string {
 		return "Codex"
 	case AppGemini:
 		return "Gemini"
+	case AppPi:
+		return "Pi"
 	default:
 		return strings.Title(string(a))
 	}
@@ -42,7 +45,7 @@ func (a AppType) DisplayName() string {
 // IsLiveApp 表示该类型会读写本地 CLI live 配置。
 func (a AppType) IsLiveApp() bool {
 	switch a {
-	case AppClaude, AppCodex, AppGemini:
+	case AppClaude, AppCodex, AppGemini, AppPi:
 		return true
 	default:
 		return false
@@ -76,6 +79,7 @@ type ProviderInput struct {
 	BaseURL         string
 	APIKey          string
 	Model           string
+	APIType         string // Pi: openai-completions / openai-responses / anthropic-messages / google-generative-ai
 	ReasoningEffort string
 	Website         string
 	Notes           string

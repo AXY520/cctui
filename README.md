@@ -10,8 +10,8 @@
 
 ## 功能特性
 
-- 支持 `Claude`、`Codex`、`Gemini` 三类应用
-- 支持 **全局供应商**：一次添加，自动同步到三家 CLI，再到各分组里切换启用
+- 支持 `Claude`、`Codex`、`Gemini`、`Pi` 四类应用/Agent
+- 支持 **全局供应商**：一次添加，自动同步到 Claude/Codex/Gemini/Pi，再到各分组里切换启用
 - 使用 SQLite 保存供应商配置，数据默认位于 `~/.cc-switch/`
 - 首次启动时，如果某个应用还没有保存的供应商，会尝试导入当前 live 配置
 - 切换前会先读取当前 live 配置并回写数据库，尽量保留你在外部手动改过的内容
@@ -28,6 +28,9 @@
 - `Codex`：`~/.codex/config.toml`
 - `Gemini`：`~/.gemini/.env`
 - `Gemini`：`~/.gemini/settings.json`
+- `Pi`：`~/.pi/agent/models.json`
+- `Pi`：`~/.pi/agent/auth.json`
+- `Pi`：`~/.pi/agent/settings.json`
 
 程序自己的本地数据默认保存在：
 
@@ -100,16 +103,16 @@ go build -o cctui .
 - `d`：删除供应商
 - `u`：检查更新；发现新版本后可确认自动下载并替换
 - `t`：对当前供应商测速
-- `0/1/2/3`：跳到 全局 / Claude / Codex / Gemini
+- `0/1/2/3/4`：跳到 全局 / Claude / Codex / Gemini / Pi
 - `↑/↓` 或 `j/k`：移动光标
 
 ### 全局供应商
 
-列表顶部是 **全局** 分组。在这里新增供应商后，会自动在 Claude、Codex、Gemini 中各创建一份同名配置，但不会自动切换 live。
+列表顶部是 **全局** 分组。在这里新增供应商后，会自动在 Claude、Codex、Gemini、Pi 中各创建一份同名配置，但不会自动切换 live。
 
 你再到对应 CLI 分组里选中那份配置，按 `Enter` 才会写到本地配置文件并生效。
 
-编辑全局供应商会同步更新三家 CLI 中的关联副本；删除全局供应商会尽量删除这些副本（若某 CLI 正在使用且还有其他供应商，则该副本会保留）。
+编辑全局供应商会同步更新各 CLI/Agent 中的关联副本；删除全局供应商会尽量删除这些副本（若某 CLI 正在使用且还有其他供应商，则该副本会保留）。
 - `1/2/3`：快速跳转到 `Claude` / `Codex` / `Gemini`
 - `g/G`：跳到顶部 / 底部
 - `q`：退出
