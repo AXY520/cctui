@@ -58,6 +58,19 @@ go build -o cctui .
 ./cctui
 ```
 
+### 常用命令行参数
+
+```bash
+cctui                     # 启动 TUI
+cctui update              # 检查并更新
+cctui update -y           # 更新（免确认）
+cctui check-update        # 仅检查新版本
+cctui uninstall           # 卸载程序
+cctui uninstall --purge   # 卸载并删除 ~/.cc-switch
+cctui version             # 版本号
+cctui help                # 帮助
+```
+
 ## AUR 自动发布
 
 仓库内置了 GitHub Actions workflow：当你给 GitHub 仓库 push 一个 tag 时，会自动更新 AUR 仓库：
@@ -104,6 +117,8 @@ go build -o cctui .
 - `u`：检查更新；发现新版本后可确认自动下载并替换
 - `t`：对当前供应商测速
 - `0/1/2/3/4`：跳到 全局 / Claude / Codex / Gemini / Pi
+
+表单里 `Reasoning Effort`（Codex/全局）和 `API Type`（Pi）支持 **Enter 弹出选项** 或 **←/→ 快速切换**，不用手打。
 - `↑/↓` 或 `j/k`：移动光标
 
 ### 全局供应商

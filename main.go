@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"cctui/internal/ccswitch"
+	"cctui/internal/cli"
 	"cctui/internal/ui"
 )
 
@@ -14,10 +15,19 @@ var version = "dev"
 
 func main() {
 	ui.Version = version
-	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
-		fmt.Println("cctui", version)
-		os.Exit(0)
+
+	// 兼容: cctui -u / cctui --update
+	args := os.Args[1:]
+	if len(args) > 0 {
+		switch args[0] {
+		case "-u":
+			args[0] = "update"
+		}
+		if cli.Run(version, args) {
+			return
+		}
 	}
+
 	store, err := ccswitch.OpenStore()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "打开数据存储失败: %v\n", err)

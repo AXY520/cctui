@@ -62,9 +62,11 @@ type formState struct {
 }
 
 type modelPickerState struct {
-	app    ccswitch.AppType
-	models []string
-	cursor int
+	app         ccswitch.AppType
+	title       string
+	models      []string
+	cursor      int
+	targetField int
 }
 
 type confirmState struct {
@@ -99,6 +101,22 @@ type updateApplyResultMsg struct {
 }
 
 var Version = "dev"
+
+var reasoningEffortOptions = []string{
+	"", // 默认/不设置
+	"minimal",
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+}
+
+var piAPITypeOptions = []string{
+	"openai-completions",
+	"openai-responses",
+	"anthropic-messages",
+	"google-generative-ai",
+}
 
 type Model struct {
 	store          *ccswitch.Store
@@ -195,11 +213,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if len(typed.models) == 0 {
 			m.form.errorMessage = "未获取到模型"
 		} else {
-			m.modelPicker = &modelPickerState{
-				app:    typed.app,
-				models: typed.models,
-			}
-			m.mode = modeModelPicker
+			m.openListPicker(
+				fmt.Sprintf("选择 %s 模型", typed.app.DisplayName()),
+				typed.models,
+				m.form.modelFieldIndex,
+			)
 			m.form.errorMessage = ""
 		}
 		return m, nil
@@ -371,13 +389,26 @@ func (m *Model) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.syncFormFocus()
 			return m, nil
-		case "enter":
-			if m.form.focusIndex >= len(m.form.fields)-1 {
-				return m.saveForm()
+		case "left", "h":
+			if m.cycleSelectField(-1) {
+				return m, nil
 			}
-			m.form.focusIndex = (m.form.focusIndex + 1) % len(m.form.fields)
-			m.syncFormFocus()
-			return m, nil
+		case "right", "l":
+			if m.cycleSelectField(1) {
+				return m, nil
+			}
+		case "enter", " ":
+			if m.openSelectFieldPicker() {
+				return m, nil
+			}
+			if typed.String() == "enter" {
+				if m.form.focusIndex >= len(m.form.fields)-1 {
+					return m.saveForm()
+				}
+				m.form.focusIndex = (m.form.focusIndex + 1) % len(m.form.fields)
+				m.syncFormFocus()
+				return m, nil
+			}
 		case "ctrl+s":
 			return m.saveForm()
 		case "ctrl+f":
@@ -385,7 +416,15 @@ func (m *Model) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.form.errorMessage = "正在获取模型列表..."
 				return m, m.fetchModels()
 			}
+			if m.openSelectFieldPicker() {
+				return m, nil
+			}
 		}
+	}
+
+	// 选择型字段不吃自由输入，避免误打一堆垃圾
+	if m.isSelectField(m.form.focusIndex) {
+		return m, nil
 	}
 
 	var cmds []tea.Cmd
@@ -457,10 +496,20 @@ func (m *Model) updateModelPicker(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if m.modelPicker != nil && len(m.modelPicker.models) > 0 {
 				selected := m.modelPicker.models[m.modelPicker.cursor]
-				m.form.fields[m.form.modelFieldIndex].SetValue(selected)
+				target := m.modelPicker.targetField
+				if target < 0 || target >= len(m.form.fields) {
+					target = m.form.modelFieldIndex
+				}
+				// 显示层把空值映射成「默认」，写回时还原为空
+				if m.form.labels[target] == "Reasoning Effort" && (selected == "默认" || selected == "(默认)") {
+					selected = ""
+				}
+				m.form.fields[target].SetValue(selected)
 				m.mode = modeForm
 				m.modelPicker = nil
-				m.form.focusIndex++
+				if target+1 < len(m.form.fields) {
+					m.form.focusIndex = target + 1
+				}
 				m.syncFormFocus()
 			}
 			return m, nil
@@ -1029,7 +1078,10 @@ func (m *Model) viewModelPicker() string {
 		return ""
 	}
 
-	title := fmt.Sprintf("选择 %s 模型", m.modelPicker.app.DisplayName())
+	title := m.modelPicker.title
+	if title == "" {
+		title = fmt.Sprintf("选择 %s 模型", m.modelPicker.app.DisplayName())
+	}
 	lines := []string{panelTitleStyle.Render(title), ""}
 
 	bodyHeight := max(6, m.height-8)
@@ -1080,8 +1132,13 @@ func (m *Model) viewForm() string {
 		"",
 	}
 	for index, field := range m.form.fields {
-		lines = append(lines, labelStyle.Render(m.form.labels[index]))
-		lines = append(lines, field.View())
+		label := m.form.labels[index]
+		lines = append(lines, labelStyle.Render(label))
+		if m.isSelectField(index) {
+			lines = append(lines, m.renderSelectField(index, field))
+		} else {
+			lines = append(lines, field.View())
+		}
 		lines = append(lines, "")
 	}
 	if m.form.errorMessage != "" {
@@ -1347,10 +1404,11 @@ func (m *Model) renderHelpLines() []string {
 	switch m.mode {
 	case modeForm:
 		items = []string{
-			help("Enter", "下一项/保存"),
+			help("Enter", "选择/下一项/保存"),
+			help("←/→", "切换选项"),
 			help("Tab", "下一项"),
 			help("Shift+Tab", "上一项"),
-			help("Ctrl+F", "获取模型"),
+			help("Ctrl+F", "获取模型/打开选项"),
 			help("Ctrl+S", "保存"),
 			help("Esc", "返回"),
 		}
@@ -1490,6 +1548,124 @@ func (m *Model) formInput() ccswitch.ProviderInput {
 	return input
 }
 
+func (m *Model) openListPicker(title string, items []string, targetField int) {
+	displayItems := make([]string, len(items))
+	cursor := 0
+	current := ""
+	if targetField >= 0 && targetField < len(m.form.fields) {
+		current = strings.TrimSpace(m.form.fields[targetField].Value())
+	}
+	for i, item := range items {
+		display := item
+		if m.form.labels[targetField] == "Reasoning Effort" && item == "" {
+			display = "默认"
+		}
+		displayItems[i] = display
+		if item == current || (item == "" && current == "") {
+			cursor = i
+		}
+	}
+	m.modelPicker = &modelPickerState{
+		app:         m.form.app,
+		title:       title,
+		models:      displayItems,
+		cursor:      cursor,
+		targetField: targetField,
+	}
+	m.mode = modeModelPicker
+}
+
+func (m *Model) isSelectField(index int) bool {
+	if index < 0 || index >= len(m.form.labels) {
+		return false
+	}
+	switch m.form.labels[index] {
+	case "Reasoning Effort", "API Type":
+		return true
+	default:
+		return false
+	}
+}
+
+func (m *Model) selectOptionsForField(index int) []string {
+	if index < 0 || index >= len(m.form.labels) {
+		return nil
+	}
+	switch m.form.labels[index] {
+	case "Reasoning Effort":
+		return reasoningEffortOptions
+	case "API Type":
+		return piAPITypeOptions
+	default:
+		return nil
+	}
+}
+
+func (m *Model) openSelectFieldPicker() bool {
+	if !m.isSelectField(m.form.focusIndex) {
+		return false
+	}
+	options := m.selectOptionsForField(m.form.focusIndex)
+	if len(options) == 0 {
+		return false
+	}
+	title := "选择 " + m.form.labels[m.form.focusIndex]
+	m.openListPicker(title, options, m.form.focusIndex)
+	return true
+}
+
+func (m *Model) cycleSelectField(delta int) bool {
+	index := m.form.focusIndex
+	if !m.isSelectField(index) {
+		return false
+	}
+	options := m.selectOptionsForField(index)
+	if len(options) == 0 {
+		return false
+	}
+	current := strings.TrimSpace(m.form.fields[index].Value())
+	pos := 0
+	found := false
+	for i, option := range options {
+		if option == current {
+			pos = i
+			found = true
+			break
+		}
+	}
+	if !found && current != "" {
+		// 未知值时，从相邻项开始
+		if delta > 0 {
+			pos = -1
+		} else {
+			pos = 0
+		}
+	}
+	pos = (pos + delta) % len(options)
+	if pos < 0 {
+		pos += len(options)
+	}
+	m.form.fields[index].SetValue(options[pos])
+	return true
+}
+
+func (m *Model) renderSelectField(index int, field textinput.Model) string {
+	value := strings.TrimSpace(field.Value())
+	display := value
+	if m.form.labels[index] == "Reasoning Effort" && display == "" {
+		display = "默认"
+	}
+	if display == "" {
+		display = "未选择"
+	}
+	hint := mutedStyle.Render("[Enter 选择 · ←/→ 切换]")
+	line := "› " + display + "  " + hint
+	if index == m.form.focusIndex {
+		return selectedStyle.Render("› " + display + "  [Enter 选择 · ←/→ 切换]")
+	}
+	return line
+}
+
 func help(key, desc string) string {
 	return helpKeyStyle.Render("["+key+"]") + desc
 }
@@ -1620,7 +1796,7 @@ func placeholderFor(app ccswitch.AppType, label string) string {
 	case "API Type":
 		return "openai-completions / openai-responses / anthropic-messages / google-generative-ai"
 	case "Reasoning Effort":
-		return "e.g. medium / high"
+		return "默认 / minimal / low / medium / high / xhigh"
 	case "Website":
 		return "Optional: provider website"
 	case "Notes":
