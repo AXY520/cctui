@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -16,6 +18,15 @@ import (
 )
 
 const userAgent = "cctui-updater"
+
+const (
+	giteeAPILatest   = "https://gitee.com/api/v5/repos/aixinyin/cctui/releases/latest"
+	giteeReleasesWeb = "https://gitee.com/aixinyin/cctui/releases"
+	giteeDownloadFmt = "https://gitee.com/aixinyin/cctui/releases/download/%s/%s"
+	githubAPILatest  = "https://api.github.com/repos/AXY520/cctui/releases/latest"
+)
+
+var giteeTagRe = regexp.MustCompile(`/aixinyin/cctui/releases/tag/(v?[0-9][^"'?\s#]*)`)
 
 // Info 描述一次可用更新。
 type Info struct {
@@ -39,14 +50,13 @@ type releaseResponse struct {
 	} `json:"assets"`
 }
 
-type releaseSource struct {
-	Name string
-	URL  string
-}
-
-var defaultSources = []releaseSource{
-	{Name: "gitee", URL: "https://gitee.com/api/v5/repos/aixinyin/cctui/releases/latest"},
-	{Name: "github", URL: "https://api.github.com/repos/AXY520/cctui/releases/latest"},
+type releaseCandidate struct {
+	Tag       string
+	Latest    string
+	Notes     string
+	AssetURL  string
+	AssetName string
+	Source    string
 }
 
 // Normalize 去掉 v 前缀并裁剪空白。
@@ -87,24 +97,83 @@ func HasUpdate(current, latest string) bool {
 }
 
 // Check 查询远端最新版本；无更新时返回 (nil, nil)。
+//
+// 会聚合多个来源，取最高版本，避免：
+// 1. Gitee API 限流后误信 GitHub 旧 release；
+// 2. 某一源返回“无更新”就提前结束，漏掉其他源的新版本。
 func Check(current string) (*Info, error) {
-	client := &http.Client{Timeout: 8 * time.Second}
+	client := &http.Client{Timeout: 12 * time.Second}
 	wanted := assetName()
-	var lastErr error
 
-	for _, source := range defaultSources {
-		info, err := checkSource(client, source, current, wanted)
-		if err != nil {
-			lastErr = err
-			continue
+	var (
+		candidates []releaseCandidate
+		errs       []string
+	)
+
+	addErr := func(err error) {
+		if err == nil {
+			return
 		}
-		return info, nil
+		msg := strings.TrimSpace(err.Error())
+		if msg == "" {
+			return
+		}
+		for _, existing := range errs {
+			if existing == msg {
+				return
+			}
+		}
+		errs = append(errs, msg)
 	}
 
-	if lastErr == nil {
-		lastErr = fmt.Errorf("未找到可用发布源")
+	if c, err := fetchGiteeAPI(client, wanted); err != nil {
+		addErr(err)
+	} else if c != nil {
+		candidates = append(candidates, *c)
 	}
-	return nil, lastErr
+
+	// HTML 不走 API 配额，限流时仍可用。
+	if c, err := fetchGiteeHTML(client, wanted); err != nil {
+		addErr(err)
+	} else if c != nil {
+		candidates = append(candidates, *c)
+	}
+
+	if c, err := fetchGitHubAPI(client, wanted); err != nil {
+		addErr(err)
+	} else if c != nil {
+		candidates = append(candidates, *c)
+	}
+
+	if len(candidates) == 0 {
+		if len(errs) == 0 {
+			return nil, fmt.Errorf("未找到可用发布源")
+		}
+		return nil, fmt.Errorf("检查更新失败: %s", strings.Join(errs, " | "))
+	}
+
+	best := candidates[0]
+	for _, item := range candidates[1:] {
+		if Compare(item.Latest, best.Latest) > 0 {
+			best = item
+		}
+	}
+
+	if !HasUpdate(current, best.Latest) {
+		return nil, nil
+	}
+
+	exe, _ := CurrentExecutable()
+	return &Info{
+		Current:    Normalize(current),
+		Latest:     best.Latest,
+		Tag:        best.Tag,
+		Notes:      best.Notes,
+		AssetURL:   best.AssetURL,
+		AssetName:  best.AssetName,
+		Source:     best.Source,
+		Executable: exe,
+	}, nil
 }
 
 // Apply 下载并替换当前可执行文件，返回安装路径。
@@ -175,8 +244,110 @@ func CurrentExecutable() (string, error) {
 	return filepath.EvalSymlinks(exe)
 }
 
-func checkSource(client *http.Client, source releaseSource, current, wanted string) (*Info, error) {
-	req, err := http.NewRequest(http.MethodGet, source.URL, nil)
+func fetchGiteeAPI(client *http.Client, wanted string) (*releaseCandidate, error) {
+	endpoint := giteeAPILatest
+	if token := giteeToken(); token != "" {
+		endpoint += "?access_token=" + url.QueryEscape(token)
+	}
+	release, err := fetchReleaseJSON(client, endpoint, "gitee-api")
+	if err != nil {
+		return nil, err
+	}
+	return candidateFromRelease(release, wanted, "gitee-api", func(tag, name string) string {
+		return fmt.Sprintf(giteeDownloadFmt, tag, name)
+	})
+}
+
+func fetchGitHubAPI(client *http.Client, wanted string) (*releaseCandidate, error) {
+	release, err := fetchReleaseJSON(client, githubAPILatest, "github")
+	if err != nil {
+		return nil, err
+	}
+	return candidateFromRelease(release, wanted, "github", nil)
+}
+
+func fetchGiteeHTML(client *http.Client, wanted string) (*releaseCandidate, error) {
+	req, err := http.NewRequest(http.MethodGet, giteeReleasesWeb, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; cctui-updater)")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("gitee-html: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		return nil, fmt.Errorf("gitee-html: HTTP %d %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return nil, fmt.Errorf("gitee-html: 读取失败: %w", err)
+	}
+
+	matches := giteeTagRe.FindAllStringSubmatch(string(body), -1)
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("gitee-html: 未解析到 release tag")
+	}
+
+	bestTag := ""
+	bestLatest := ""
+	seen := map[string]bool{}
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		tag := strings.TrimSpace(match[1])
+		tag = strings.TrimSuffix(tag, "/")
+		if tag == "" || seen[tag] {
+			continue
+		}
+		seen[tag] = true
+		latest := Normalize(tag)
+		if latest == "" {
+			continue
+		}
+		if bestLatest == "" || Compare(latest, bestLatest) > 0 {
+			bestTag = tag
+			bestLatest = latest
+		}
+	}
+	if bestTag == "" {
+		return nil, fmt.Errorf("gitee-html: 未找到有效版本")
+	}
+	if !strings.HasPrefix(bestTag, "v") && !strings.HasPrefix(bestTag, "V") {
+		bestTag = "v" + bestTag
+	}
+
+	assetURL := fmt.Sprintf(giteeDownloadFmt, bestTag, wanted)
+	// 用 HEAD/GET 探活；有的环境 HEAD 被拒，失败不直接判死，仍返回 URL。
+	if err := probeAssetURL(client, assetURL); err != nil {
+		// 仍然返回候选，真正下载时再报错；但给 source 标记
+		return &releaseCandidate{
+			Tag:       bestTag,
+			Latest:    bestLatest,
+			AssetURL:  assetURL,
+			AssetName: wanted,
+			Source:    "gitee-html",
+		}, nil
+	}
+
+	return &releaseCandidate{
+		Tag:       bestTag,
+		Latest:    bestLatest,
+		AssetURL:  assetURL,
+		AssetName: wanted,
+		Source:    "gitee-html",
+	}, nil
+}
+
+func fetchReleaseJSON(client *http.Client, endpoint, source string) (*releaseResponse, error) {
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -185,57 +356,116 @@ func checkSource(client *http.Client, source releaseSource, current, wanted stri
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", source.Name, err)
+		return nil, fmt.Errorf("%s: %w", source, err)
 	}
 	defer resp.Body.Close()
 
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return nil, fmt.Errorf("%s: 读取失败: %w", source, err)
+	}
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		return nil, fmt.Errorf("%s: HTTP %d %s", source.Name, resp.StatusCode, strings.TrimSpace(string(body)))
+		msg := strings.TrimSpace(string(body))
+		if msg == "" {
+			msg = resp.Status
+		}
+		// 限流文案更直白
+		if resp.StatusCode == http.StatusForbidden && strings.Contains(strings.ToLower(msg), "rate limit") {
+			return nil, fmt.Errorf("%s: 接口限流 (HTTP 403)", source)
+		}
+		return nil, fmt.Errorf("%s: HTTP %d %s", source, resp.StatusCode, msg)
 	}
 
 	var release releaseResponse
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return nil, fmt.Errorf("%s: 解析发布信息失败: %w", source.Name, err)
+	if err := json.Unmarshal(body, &release); err != nil {
+		return nil, fmt.Errorf("%s: 解析发布信息失败: %w", source, err)
 	}
+	return &release, nil
+}
 
+func candidateFromRelease(release *releaseResponse, wanted, source string, fallbackURL func(tag, name string) string) (*releaseCandidate, error) {
+	if release == nil {
+		return nil, fmt.Errorf("%s: 发布信息为空", source)
+	}
 	tag := strings.TrimSpace(release.TagName)
 	if tag == "" {
 		tag = strings.TrimSpace(release.Name)
 	}
 	latest := Normalize(tag)
 	if latest == "" {
-		return nil, fmt.Errorf("%s: 发布版本为空", source.Name)
+		return nil, fmt.Errorf("%s: 发布版本为空", source)
+	}
+	if !strings.HasPrefix(tag, "v") && !strings.HasPrefix(tag, "V") {
+		tag = "v" + latest
 	}
 
 	assetURL := ""
 	assetNameValue := wanted
 	for _, asset := range release.Assets {
-		if asset.Name == wanted && strings.TrimSpace(asset.BrowserDownloadURL) != "" {
-			assetURL = asset.BrowserDownloadURL
-			assetNameValue = asset.Name
+		if asset.Name != wanted {
+			continue
+		}
+		assetNameValue = asset.Name
+		if strings.TrimSpace(asset.BrowserDownloadURL) != "" {
+			assetURL = strings.TrimSpace(asset.BrowserDownloadURL)
 			break
 		}
 	}
+	if assetURL == "" && fallbackURL != nil {
+		assetURL = fallbackURL(tag, wanted)
+	}
 	if assetURL == "" {
-		return nil, fmt.Errorf("%s: 未找到 %s", source.Name, wanted)
+		return nil, fmt.Errorf("%s: 未找到 %s", source, wanted)
 	}
 
-	if !HasUpdate(current, latest) {
-		return nil, nil
-	}
-
-	exe, _ := CurrentExecutable()
-	return &Info{
-		Current:    Normalize(current),
-		Latest:     latest,
-		Tag:        tag,
-		Notes:      strings.TrimSpace(release.Body),
-		AssetURL:   assetURL,
-		AssetName:  assetNameValue,
-		Source:     source.Name,
-		Executable: exe,
+	return &releaseCandidate{
+		Tag:       tag,
+		Latest:    latest,
+		Notes:     strings.TrimSpace(release.Body),
+		AssetURL:  assetURL,
+		AssetName: assetNameValue,
+		Source:    source,
 	}, nil
+}
+
+func probeAssetURL(client *http.Client, assetURL string) error {
+	req, err := http.NewRequest(http.MethodHead, assetURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+		return nil
+	}
+	// 有的 CDN/Gitee 对 HEAD 不友好，再试一次 GET 但不读完
+	req, err = http.NewRequest(http.MethodGet, assetURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	resp, err = client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+		return nil
+	}
+	return fmt.Errorf("HTTP %d", resp.StatusCode)
+}
+
+func giteeToken() string {
+	for _, key := range []string{"CCTUI_GITEE_TOKEN", "GITEE_TOKEN"} {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func assetName() string {
@@ -252,10 +482,10 @@ func assetName() string {
 
 func parseVersion(version string) [3]int {
 	var out [3]int
+	version = strings.TrimSpace(version)
 	if version == "" || version == "dev" {
 		return out
 	}
-
 	// 只取主版本号部分，忽略 -beta 等后缀
 	if idx := strings.IndexAny(version, "-+"); idx >= 0 {
 		version = version[:idx]
@@ -271,8 +501,8 @@ func parseVersion(version string) [3]int {
 	return out
 }
 
-func downloadFile(client *http.Client, url, dest string) error {
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+func downloadFile(client *http.Client, rawURL, dest string) error {
+	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
 	if err != nil {
 		return err
 	}
