@@ -2,6 +2,9 @@
 # cctui 交互式安装 / 卸载 / 更新脚本
 set -euo pipefail
 
+# Ctrl+C 只表示取消当前操作，不能被下载失败分支当成继续安装。
+trap 'exit 130' INT
+
 # ── 颜色 ─────────────────────────────────────────────────────────────
 if [[ -t 1 ]]; then
   RED=$'\033[0;31m';   GREEN=$'\033[0;32m'; YELLOW=$'\033[0;33m'
@@ -25,8 +28,12 @@ has_tty() { { : </dev/tty; } 2>/dev/null; }
 # 从终端读取一行输入; 无 tty 时返回失败, 由调用方决定默认行为
 read_tty() {
   local __var="$1"; local __reply=""
-  has_tty || return 1
-  read -r __reply </dev/tty 2>/dev/null || return 1
+  if [[ -t 0 ]]; then
+    IFS= read -r __reply || return 1
+  else
+    has_tty || return 1
+    IFS= read -r __reply </dev/tty 2>/dev/null || return 1
+  fi
   printf -v "$__var" '%s' "$__reply"
 }
 
@@ -40,9 +47,13 @@ else
 fi
 
 # ── Gitee API ────────────────────────────────────────────────────────
-repo_api()     { curl -fsSL "https://${REPO_HOST}/api/v5/repos/${REPO}${1}" 2>/dev/null; }
-repo_dl()      { curl -fSL --progress-bar -o "$2" "${BASE_URL}/${REPO}${1}"; }
-get_latest()   { repo_api "/releases/latest" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'; }
+repo_api()     { curl -fsSL --connect-timeout 10 --max-time 30 "https://${REPO_HOST}/api/v5/repos/${REPO}${1}" 2>/dev/null; }
+repo_dl()      { curl -fSL --connect-timeout 10 --max-time 300 --progress-bar -o "$2" "${BASE_URL}/${REPO}${1}"; }
+get_latest() {
+  local response
+  response="$(repo_api "/releases/latest")" || return $?
+  sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' <<<"$response"
+}
 
 # ── 系统检测 ─────────────────────────────────────────────────────────
 detect_arch() {
@@ -99,7 +110,7 @@ build_source() {
   else
     local tu="https://${REPO_HOST}/${REPO}/archive/refs/tags/${tag}.tar.gz"
     [[ -n "$MIRROR" ]] && tu="${MIRROR}/${tu}"
-    curl -fSL --progress-bar -o "${tmp}/src.tar.gz" "$tu" || die "源码下载失败"
+    curl -fSL --connect-timeout 10 --max-time 300 --progress-bar -o "${tmp}/src.tar.gz" "$tu" || die "源码下载失败"
     tar xzf "${tmp}/src.tar.gz" -C "$sd" --strip-components=1
   fi
   (cd "$sd"; export CGO_ENABLED=0 GOFLAGS="-buildmode=pie -trimpath -mod=readonly";
@@ -131,6 +142,8 @@ do_install() {
   if download_binary "$ver" "$tmp" "$os" "$arch"; then
     install_cctui "$ver" "${tmp}/cctui"
   else
+    local status=$?
+    ((status == 130)) && exit 130
     warn "预编译二进制不可用, 尝试源码编译..."
     build_source "$ver" "$tmp"
     install_cctui "$ver" "${tmp}/cctui"
@@ -208,7 +221,14 @@ main() {
       ;;
   esac
 
-  local latest; latest="$(get_latest)" || latest="获取失败"
+  local latest
+  if latest="$(get_latest)"; then
+    :
+  else
+    local status=$?
+    ((status == 130)) && exit 130
+    latest="获取失败"
+  fi
   show_panel "$latest"
 
   local msg=""
