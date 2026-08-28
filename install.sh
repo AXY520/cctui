@@ -261,15 +261,19 @@ main() {
   done
   printf "\n请选择操作 [1-%d]: " "${#opts[@]}"
 
-  # 无可交互终端时(如 curl|bash 且无 tty), 默认执行第 1 项而不是卡住/报错
+  # 管道执行是公开的一键安装入口（curl | bash），不应等待 /dev/tty 输入。
+  # 直接执行 bash install.sh 仍保留交互菜单。
   local choice=""
-  if ! read_tty choice; then
+  if [[ ! -t 0 ]]; then
     choice=1
     printf "1\n"
-    if ! has_tty; then
-      warn "未检测到交互终端, 默认执行: ${opts[0]}"
-      info "如需指定操作可用: bash install.sh -i <版本>  或  -u 卸载"
-    fi
+    info "检测到管道执行, 自动执行: ${opts[0]}"
+    info "如需指定操作可用: bash install.sh -i <版本>  或  -u 卸载"
+  elif ! read_tty choice; then
+    choice=1
+    printf "1\n"
+    warn "未检测到可交互终端, 默认执行: ${opts[0]}"
+    info "如需指定操作可用: bash install.sh -i <版本>  或  -u 卸载"
   fi
   choice="${choice:-1}"
 
