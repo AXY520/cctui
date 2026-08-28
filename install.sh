@@ -93,8 +93,15 @@ download_binary() {
   local tag="$1" tmp="$2" os="${3:-linux}" arch="${4:-amd64}"
   local an="cctui-${os}-${arch}.tar.gz"
   info "正在下载: ${an}"
-  repo_dl "/releases/download/${tag}/${an}" "${tmp}/${an}" || return 1
-  tar xzf "${tmp}/${an}" -C "$tmp" && [[ -x "$tmp/cctui" ]] || return 1
+  repo_dl "/releases/download/${tag}/${an}" "${tmp}/${an}" || {
+    local status=$?
+    return "$status"
+  }
+  tar xzf "${tmp}/${an}" -C "$tmp" || {
+    local status=$?
+    return "$status"
+  }
+  [[ -x "$tmp/cctui" ]] || return 1
   ok "下载完成"
   return 0
 }
@@ -110,7 +117,11 @@ build_source() {
   else
     local tu="https://${REPO_HOST}/${REPO}/archive/refs/tags/${tag}.tar.gz"
     [[ -n "$MIRROR" ]] && tu="${MIRROR}/${tu}"
-    curl -fSL --connect-timeout 10 --max-time 300 --progress-bar -o "${tmp}/src.tar.gz" "$tu" || die "源码下载失败"
+    curl -fSL --connect-timeout 10 --max-time 300 --progress-bar -o "${tmp}/src.tar.gz" "$tu" || {
+      local status=$?
+      ((status == 130)) && exit 130
+      die "源码下载失败"
+    }
     tar xzf "${tmp}/src.tar.gz" -C "$sd" --strip-components=1
   fi
   (cd "$sd"; export CGO_ENABLED=0 GOFLAGS="-buildmode=pie -trimpath -mod=readonly";
