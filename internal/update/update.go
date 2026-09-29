@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -177,7 +178,14 @@ func Check(current string) (*Info, error) {
 }
 
 // Apply 下载并替换当前可执行文件，返回安装路径。
+// Apply 下载并替换当前可执行文件，返回安装路径。
 func Apply(info *Info) (string, error) {
+	return ApplyWithProgress(info, nil)
+}
+
+// ApplyWithProgress 同 Apply；report 非 nil 时会持续回调下载进度
+// （done 已下载字节数，total 总字节数，未知时为 0；重试时进度归零重新计）。
+func ApplyWithProgress(info *Info, report func(done, total int64)) (string, error) {
 	if info == nil {
 		return "", fmt.Errorf("更新信息为空")
 	}
@@ -214,9 +222,22 @@ func Apply(info *Info) (string, error) {
 	}
 	archivePath := filepath.Join(tmpDir, asset)
 
-	client := &http.Client{Timeout: 90 * time.Second}
-	if err := downloadFile(client, info.AssetURL, archivePath); err != nil {
-		return "", err
+	client := newDownloadClient()
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		if attempt > 1 && report != nil {
+			report(0, 0)
+			time.Sleep(time.Duration(attempt-1) * time.Second)
+		}
+		if err := downloadFile(client, info.AssetURL, archivePath, report); err != nil {
+			lastErr = err
+			continue
+		}
+		lastErr = nil
+		break
+	}
+	if lastErr != nil {
+		return "", lastErr
 	}
 
 	binaryPath, err := extractBinary(archivePath, tmpDir)
@@ -501,7 +522,26 @@ func parseVersion(version string) [3]int {
 	return out
 }
 
-func downloadFile(client *http.Client, rawURL, dest string) error {
+// newDownloadClient 下载专用客户端：总时长放宽，但连接/TLS/响应头阶段单独收紧，
+// 避免 Gitee CDN（foruda）建连或回源慢时整个请求被短超时一刀切；
+// body 传输阶段不受总时长限制（由重试兜底卡死场景）。
+func newDownloadClient() *http.Client {
+	return &http.Client{
+		Timeout: 10 * time.Minute,
+		Transport: &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			DialContext: (&net.Dialer{
+				Timeout:   15 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			TLSHandshakeTimeout:   15 * time.Second,
+			ResponseHeaderTimeout: 45 * time.Second,
+			IdleConnTimeout:       30 * time.Second,
+		},
+	}
+}
+
+func downloadFile(client *http.Client, rawURL, dest string, report func(done, total int64)) error {
 	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
 	if err != nil {
 		return err
@@ -524,10 +564,35 @@ func downloadFile(client *http.Client, rawURL, dest string) error {
 	}
 	defer file.Close()
 
-	if _, err := io.Copy(file, resp.Body); err != nil {
+	var src io.Reader = resp.Body
+	if report != nil {
+		src = &progressReader{reader: resp.Body, total: resp.ContentLength, report: report}
+	}
+
+	if _, err := io.Copy(file, src); err != nil {
 		return fmt.Errorf("写入临时文件失败: %w", err)
 	}
 	return nil
+}
+
+type progressReader struct {
+	reader io.Reader
+	total  int64
+	done   int64
+	report func(done, total int64)
+}
+
+func (p *progressReader) Read(b []byte) (int, error) {
+	n, err := p.reader.Read(b)
+	if n > 0 {
+		p.done += int64(n)
+		total := p.total
+		if total < 0 {
+			total = 0
+		}
+		p.report(p.done, total)
+	}
+	return n, err
 }
 
 func extractBinary(archivePath, destDir string) (string, error) {

@@ -135,7 +135,20 @@ func runUpdate(version string, args []string) error {
 	}
 
 	fmt.Printf("正在下载并安装 v%s ...\n", info.Latest)
-	path, err := update.Apply(info)
+	lastPct := -1
+	path, err := update.ApplyWithProgress(info, func(done, total int64) {
+		if total <= 0 {
+			return
+		}
+		pct := int(float64(done) / float64(total) * 100)
+		if pct != lastPct {
+			lastPct = pct
+			fmt.Printf("\r下载进度: %3d%% (%.1f/%.1f MB)", pct, float64(done)/1048576, float64(total)/1048576)
+		}
+	})
+	if lastPct >= 0 {
+		fmt.Println()
+	}
 	if err != nil {
 		return fmt.Errorf("更新失败: %w", err)
 	}

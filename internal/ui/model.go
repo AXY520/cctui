@@ -108,6 +108,17 @@ type updateApplyResultMsg struct {
 	err     error
 }
 
+// updateProgressMsg 是下载进度消息；updateApplyOutcome 供完成通道回传结果。
+type updateProgressMsg struct {
+	done  int64
+	total int64
+}
+
+type updateApplyOutcome struct {
+	path string
+	err  error
+}
+
 var Version = "dev"
 
 var reasoningEffortOptions = []string{
@@ -197,6 +208,9 @@ type Model struct {
 	updateInfo     *update.Info
 	checkingUpdate bool
 	applyingUpdate bool
+	updateDone     int64
+	updateTotal    int64
+	updateWaitCmd  tea.Cmd
 	status         string
 	statusKind     statusLevel
 	selectedKey    string
@@ -963,9 +977,33 @@ func (m *Model) applyUpdateCmd(info *update.Info) tea.Cmd {
 		return nil
 	}
 	m.applyingUpdate = true
+	m.updateDone, m.updateTotal = 0, 0
+
+	progressCh := make(chan [2]int64, 64)
+	doneCh := make(chan updateApplyOutcome, 1)
+	go func() {
+		path, err := update.ApplyWithProgress(info, func(done, total int64) {
+			select {
+			case progressCh <- [2]int64{done, total}:
+			default:
+			}
+		})
+		doneCh <- updateApplyOutcome{path: path, err: err}
+	}()
+
+	m.updateWaitCmd = waitUpdateProgress(progressCh, doneCh, info.Latest)
+	return m.updateWaitCmd
+}
+
+// waitUpdateProgress 阻塞等待下载进度或完成结果，作为 tea.Cmd 被反复调度。
+func waitUpdateProgress(progressCh <-chan [2]int64, doneCh <-chan updateApplyOutcome, version string) tea.Cmd {
 	return func() tea.Msg {
-		path, err := update.Apply(info)
-		return updateApplyResultMsg{path: path, version: info.Latest, err: err}
+		select {
+		case p := <-progressCh:
+			return updateProgressMsg{done: p[0], total: p[1]}
+		case outcome := <-doneCh:
+			return updateApplyResultMsg{path: outcome.path, version: version, err: outcome.err}
+		}
 	}
 }
 
@@ -1068,6 +1106,14 @@ func (m *Model) viewUpdateConfirm() string {
 	body = append(body, "")
 	if m.applyingUpdate {
 		body = append(body, successStyle.Render("正在下载并替换二进制，请稍候..."))
+		if m.updateTotal > 0 {
+			pct := float64(m.updateDone) / float64(m.updateTotal)
+			body = append(body, fmt.Sprintf("%s %.0f%%  %s / %s",
+				renderProgressBar(pct, 30), pct*100,
+				formatBytesLocal(m.updateDone), formatBytesLocal(m.updateTotal)))
+		} else if m.updateDone > 0 {
+			body = append(body, fmt.Sprintf("已下载: %s", formatBytesLocal(m.updateDone)))
+		}
 	} else {
 		body = append(body,
 			"确认后将自动下载预编译包并替换当前程序。",
@@ -1900,6 +1946,27 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// renderProgressBar 渲染定宽文本进度条，pct 取值 0~1。
+func renderProgressBar(pct float64, width int) string {
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 1 {
+		pct = 1
+	}
+	filled := int(pct * float64(width))
+	return strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
+}
+
+// formatBytesLocal 以 KB/MB 展示字节数。
+func formatBytesLocal(n int64) string {
+	const unit = 1024 * 1024
+	if n >= unit {
+		return fmt.Sprintf("%.1f MB", float64(n)/float64(unit))
+	}
+	return fmt.Sprintf("%d KB", n/1024)
 }
 
 func max(a, b int) int {
