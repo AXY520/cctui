@@ -68,6 +68,13 @@ type modelPickerState struct {
 	models      []string
 	cursor      int
 	targetField int
+	filter      string
+	filtering   bool
+}
+
+// visible 返回按过滤词筛选后的候选列表。
+func (p *modelPickerState) visible() []string {
+	return fuzzyFilter(p.models, p.filter)
 }
 
 type confirmState struct {
@@ -137,7 +144,6 @@ var serviceTierOptions = []string{
 
 var wireAPIOptions = []string{
 	"responses",
-	"chat",
 }
 
 var piAPITypeOptions = []string{
@@ -304,6 +310,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// 全局兜底：任何模式下 Ctrl+C 都强制退出（此前只有列表页生效）
+	if key, ok := msg.(tea.KeyMsg); ok && key.String() == "ctrl+c" {
+		return m, tea.Quit
+	}
+
 	switch m.mode {
 	case modeList:
 		return m.updateList(msg)
@@ -368,8 +379,6 @@ func (m *Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "2":
 			m.jumpToApp(ccswitch.AppCodex)
 		case "3":
-			m.jumpToApp(ccswitch.AppGemini)
-		case "4":
 			m.jumpToApp(ccswitch.AppPi)
 		case "a":
 			row := m.selectedRow()
@@ -403,7 +412,7 @@ func (m *Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				if row.app == ccswitch.AppGlobal {
-					m.setStatus("全局供应商已同步到各 CLI，请到 Claude/Codex/Gemini/Pi 中按 Enter 切换", statusInfo)
+					m.setStatus("全局供应商已同步到各 CLI，请到 Claude/Codex/Pi 中按 Enter 切换", statusInfo)
 					return m, nil
 				}
 				if m.current[row.app] == row.provider.ID {
@@ -536,54 +545,96 @@ func (m *Model) updateConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) updateModelPicker(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch typed := msg.(type) {
-	case tea.KeyMsg:
+	typed, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return m, nil
+	}
+	picker := m.modelPicker
+	if picker == nil {
+		return m, nil
+	}
+
+	if picker.filtering {
 		switch typed.String() {
 		case "esc":
-			m.mode = modeForm
-			m.modelPicker = nil
-			return m, nil
+			picker.filtering = false
+		case "enter":
+			return m.confirmModelPickerSelection()
+		case "backspace":
+			runes := []rune(picker.filter)
+			if len(runes) > 0 {
+				picker.filter = string(runes[:len(runes)-1])
+				picker.cursor = 0
+			}
+		case "space":
+			picker.filter += " "
+			picker.cursor = 0
 		case "up", "k":
-			if m.modelPicker != nil && m.modelPicker.cursor > 0 {
-				m.modelPicker.cursor--
+			if picker.cursor > 0 {
+				picker.cursor--
 			}
 		case "down", "j":
-			if m.modelPicker != nil && m.modelPicker.cursor < len(m.modelPicker.models)-1 {
-				m.modelPicker.cursor++
+			if picker.cursor < len(picker.visible())-1 {
+				picker.cursor++
 			}
-		case "enter":
-			if m.modelPicker != nil && len(m.modelPicker.models) > 0 {
-				selected := m.modelPicker.models[m.modelPicker.cursor]
-				target := m.modelPicker.targetField
-				if target < 0 || target >= len(m.form.fields) {
-					target = m.form.modelFieldIndex
-				}
-				// 显示层把空值映射成「默认」/带说明文案，写回时还原
-				label := ""
-				if target >= 0 && target < len(m.form.labels) {
-					label = m.form.labels[target]
-				}
-				if selected == "默认" || selected == "(默认)" {
-					selected = ""
-				}
-				switch selected {
-				case "responses (推荐)":
-					selected = "responses"
-				case "chat (Chat Completions 中转)":
-					selected = "chat"
-				}
-				_ = label
-				m.form.fields[target].SetValue(selected)
-				m.mode = modeForm
-				m.modelPicker = nil
-				if target+1 < len(m.form.fields) {
-					m.form.focusIndex = target + 1
-				}
-				m.syncFormFocus()
+		default:
+			if typed.Type == tea.KeyRunes {
+				picker.filter += string(typed.Runes)
+				picker.cursor = 0
 			}
-			return m, nil
 		}
+		return m, nil
 	}
+
+	switch typed.String() {
+	case "esc":
+		m.mode = modeForm
+		m.modelPicker = nil
+		return m, nil
+	case "/":
+		picker.filtering = true
+	case "up", "k":
+		if picker.cursor > 0 {
+			picker.cursor--
+		}
+	case "down", "j":
+		if picker.cursor < len(picker.visible())-1 {
+			picker.cursor++
+		}
+	case "enter":
+		return m.confirmModelPickerSelection()
+	}
+	return m, nil
+}
+
+func (m *Model) confirmModelPickerSelection() (tea.Model, tea.Cmd) {
+	picker := m.modelPicker
+	visible := picker.visible()
+	if len(visible) == 0 {
+		return m, nil
+	}
+	if picker.cursor >= len(visible) {
+		picker.cursor = len(visible) - 1
+	}
+	selected := visible[picker.cursor]
+	target := picker.targetField
+	if target < 0 || target >= len(m.form.fields) {
+		target = m.form.modelFieldIndex
+	}
+	// 显示层把空值映射成「默认」/带说明文案，写回时还原
+	if selected == "默认" || selected == "(默认)" {
+		selected = ""
+	}
+	if selected == "responses (推荐)" {
+		selected = "responses"
+	}
+	m.form.fields[target].SetValue(selected)
+	m.mode = modeForm
+	m.modelPicker = nil
+	if target+1 < len(m.form.fields) {
+		m.form.focusIndex = target + 1
+	}
+	m.syncFormFocus()
 	return m, nil
 }
 
@@ -598,8 +649,6 @@ func (m *Model) fetchModels() tea.Cmd {
 			baseURL = "https://api.anthropic.com"
 		case ccswitch.AppCodex, ccswitch.AppPi, ccswitch.AppGlobal:
 			baseURL = "https://api.openai.com"
-		case ccswitch.AppGemini:
-			baseURL = "https://generativelanguage.googleapis.com"
 		}
 	}
 
@@ -617,8 +666,6 @@ func (m *Model) fetchModels() tea.Cmd {
 				return req, err
 			}
 			switch app {
-			case ccswitch.AppGemini:
-				req.Header.Set("x-goog-api-key", apiKey)
 			case ccswitch.AppClaude:
 				req.Header.Set("x-api-key", apiKey)
 				req.Header.Set("anthropic-version", "2023-06-01")
@@ -628,14 +675,9 @@ func (m *Model) fetchModels() tea.Cmd {
 			return req, nil
 		}
 
-		var urls []string
-		if app == ccswitch.AppGemini {
-			urls = []string{baseURL + "/v1beta/models"}
-		} else {
-			urls = []string{
-				modelsBaseURL + "/v1/models",
-				modelsBaseURL + "/models",
-			}
+		urls := []string{
+			modelsBaseURL + "/v1/models",
+			modelsBaseURL + "/models",
 		}
 
 		client := &http.Client{Timeout: 10 * time.Second}
@@ -671,33 +713,16 @@ func (m *Model) fetchModels() tea.Cmd {
 		}
 
 		var models []string
-
-		switch app {
-		case ccswitch.AppGemini:
-			var result struct {
-				Models []struct {
-					Name string `json:"name"`
-				} `json:"models"`
-			}
-			if err := json.Unmarshal(body, &result); err != nil {
-				return modelFetchResultMsg{app: app, err: err}
-			}
-			for _, m := range result.Models {
-				name := strings.TrimPrefix(m.Name, "models/")
-				models = append(models, name)
-			}
-		default:
-			var result struct {
-				Data []struct {
-					ID string `json:"id"`
-				} `json:"data"`
-			}
-			if err := json.Unmarshal(body, &result); err != nil {
-				return modelFetchResultMsg{app: app, err: err}
-			}
-			for _, m := range result.Data {
-				models = append(models, m.ID)
-			}
+		var result struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(body, &result); err != nil {
+			return modelFetchResultMsg{app: app, err: err}
+		}
+		for _, item := range result.Data {
+			models = append(models, item.ID)
 		}
 
 		if len(models) == 0 {
@@ -735,7 +760,7 @@ func (m *Model) saveForm() (tea.Model, tea.Cmd) {
 		}
 		m.selectedKey = providerKey(m.form.app, updated.ID)
 		if m.form.app == ccswitch.AppGlobal {
-			statusMessage = fmt.Sprintf("已更新全局供应商 %s，并同步到 Claude/Codex/Gemini/Pi", updated.Name)
+			statusMessage = fmt.Sprintf("已更新全局供应商 %s，并同步到 Claude/Codex/Pi", updated.Name)
 		} else {
 			statusMessage = fmt.Sprintf("已更新 %s", updated.Name)
 		}
@@ -747,7 +772,7 @@ func (m *Model) saveForm() (tea.Model, tea.Cmd) {
 		}
 		m.selectedKey = providerKey(m.form.app, created.ID)
 		if m.form.app == ccswitch.AppGlobal {
-			statusMessage = fmt.Sprintf("已添加全局供应商 %s，并同步到 Claude/Codex/Gemini/Pi（未自动切换）", created.Name)
+			statusMessage = fmt.Sprintf("已添加全局供应商 %s，并同步到 Claude/Codex/Pi（未自动切换）", created.Name)
 		} else {
 			statusMessage = fmt.Sprintf("已添加 %s", created.Name)
 			if autoSwitched {
@@ -901,8 +926,6 @@ func (m *Model) pingProvider(app ccswitch.AppType, provider ccswitch.Provider) t
 			baseURL = "https://api.anthropic.com"
 		case ccswitch.AppCodex, ccswitch.AppPi:
 			baseURL = "https://api.openai.com"
-		case ccswitch.AppGemini:
-			baseURL = "https://generativelanguage.googleapis.com"
 		}
 	}
 	providerID := provider.ID
@@ -1143,35 +1166,53 @@ func (m *Model) viewList() string {
 }
 
 func (m *Model) viewModelPicker() string {
-	if m.modelPicker == nil {
+	picker := m.modelPicker
+	if picker == nil {
 		return ""
 	}
 
-	title := m.modelPicker.title
+	title := picker.title
 	if title == "" {
-		title = fmt.Sprintf("选择 %s 模型", m.modelPicker.app.DisplayName())
+		title = fmt.Sprintf("选择 %s 模型", picker.app.DisplayName())
 	}
-	lines := []string{panelTitleStyle.Render(title), ""}
+	lines := []string{panelTitleStyle.Render(title)}
 
-	bodyHeight := max(6, m.height-8)
+	visible := picker.visible()
+	if picker.filtering || picker.filter != "" {
+		filterLine := "/ " + picker.filter
+		if picker.filtering {
+			filterLine += "▏"
+		}
+		lines = append(lines, formHintStyle.Render(filterLine)+mutedStyle.Render(fmt.Sprintf("  %d/%d", len(visible), len(picker.models))))
+	}
+	lines = append(lines, "")
+
+	bodyHeight := max(6, m.height-9)
 	start := 0
-	if m.modelPicker.cursor >= bodyHeight {
-		start = m.modelPicker.cursor - bodyHeight + 1
+	if picker.cursor >= bodyHeight {
+		start = picker.cursor - bodyHeight + 1
 	}
 
-	for i := start; i < len(m.modelPicker.models) && i < start+bodyHeight; i++ {
-		model := m.modelPicker.models[i]
+	for i := start; i < len(visible) && i < start+bodyHeight; i++ {
+		model := visible[i]
 		prefix := "  "
-		if i == m.modelPicker.cursor {
+		if i == picker.cursor {
 			prefix = "▶ "
 			lines = append(lines, selectedStyle.Render(prefix+model))
 		} else {
 			lines = append(lines, prefix+model)
 		}
 	}
+	if len(visible) == 0 {
+		lines = append(lines, mutedStyle.Render("  无匹配结果"))
+	}
 
 	lines = append(lines, "")
-	lines = append(lines, formHintStyle.Render("↑/↓ 移动  Enter 选择  Esc 取消"))
+	if picker.filtering {
+		lines = append(lines, formHintStyle.Render("输入过滤  ↑/↓ 移动  Enter 选择  Esc 结束过滤"))
+	} else {
+		lines = append(lines, formHintStyle.Render("↑/↓ 移动  Enter 选择  / 过滤  Esc 取消"))
+	}
 
 	panelLines := strings.Split(panelStyle.Width(max(50, min(m.width-4, 80))).Render(strings.Join(lines, "\n")), "\n")
 	page := []string{m.renderHeader()}
@@ -1250,7 +1291,7 @@ func (m *Model) viewConfirm() string {
 		body = append(body, providerURLLines(m.store, m.confirm.app, m.confirm.provider, max(24, min(m.width-8, 80)-6))...)
 		body = append(body,
 			"",
-			"将删除该全局模板，并尝试删除 Claude/Codex/Gemini/Pi 中的关联副本。",
+			"将删除该全局模板，并尝试删除 Claude/Codex/Pi 中的关联副本。",
 			"若某 CLI 正在使用该副本且还有其他供应商，则该副本会保留。",
 			"按 Enter / y 确认，Esc / n 返回。",
 		)
@@ -1508,7 +1549,7 @@ func (m *Model) renderHelpLines() []string {
 			help("a", "添加"),
 			help("e", "编辑"),
 			help("d", "删除"),
-			help("0-4", "跳分组"),
+			help("0-3", "跳分组"),
 			help("g/G", "顶/底"),
 			help("Esc", "退出"),
 		}
@@ -1704,13 +1745,8 @@ func (m *Model) openListPicker(title string, items []string, targetField int) {
 		if item == "" && selectFieldsWithDefault[label] {
 			display = "默认"
 		}
-		if label == "Wire API" {
-			switch item {
-			case "responses":
-				display = "responses (推荐)"
-			case "chat":
-				display = "chat (Chat Completions 中转)"
-			}
+		if label == "Wire API" && item == "responses" {
+			display = "responses (推荐)"
 		}
 		displayItems[i] = display
 		if item == current || (item == "" && current == "") {
@@ -1827,13 +1863,8 @@ func (m *Model) renderSelectField(index int, field textinput.Model) string {
 	if display == "" && selectFieldsWithDefault[label] {
 		display = "默认"
 	}
-	if label == "Wire API" {
-		switch display {
-		case "responses":
-			display = "responses (推荐)"
-		case "chat":
-			display = "chat (Chat Completions 中转)"
-		}
+	if label == "Wire API" && display == "responses" {
+		display = "responses (推荐)"
 	}
 	if display == "" {
 		display = "未选择"
@@ -1932,8 +1963,6 @@ func (m *Model) formHint() string {
 		return "写入 ~/.claude/settings.json（兼容旧版 claude.json）"
 	case ccswitch.AppCodex:
 		return "写入 ~/.codex/auth.json 与 ~/.codex/config.toml"
-	case ccswitch.AppGemini:
-		return "写入 ~/.gemini/.env 与 ~/.gemini/settings.json"
 	case ccswitch.AppPi:
 		return "写入 ~/.pi/agent/models.json、auth.json、settings.json（切换时设置 defaultProvider）"
 	default:
@@ -1953,21 +1982,17 @@ func placeholderFor(app ccswitch.AppType, label string) string {
 			return "例如 https://api.anthropic.com"
 		case ccswitch.AppCodex, ccswitch.AppPi:
 			return "例如 https://api.openai.com/v1"
-		case ccswitch.AppGemini:
-			return "例如 https://generativelanguage.googleapis.com"
 		}
 	case "API Key":
 		return "可留空以保留 OAuth / 登录态"
 	case "Model":
 		switch app {
 		case ccswitch.AppGlobal:
-			return "例如 gpt-5 / claude-sonnet / gemini-2.5-pro"
+			return "例如 gpt-5 / claude-sonnet / qwen3"
 		case ccswitch.AppClaude:
 			return "例如 claude-sonnet-4-5"
 		case ccswitch.AppCodex:
 			return "例如 gpt-5-codex"
-		case ccswitch.AppGemini:
-			return "例如 gemini-2.5-pro"
 		case ccswitch.AppPi:
 			return "例如 mimo-v2.5-pro / gpt-5"
 		}
@@ -1992,7 +2017,7 @@ func placeholderFor(app ccswitch.AppType, label string) string {
 	case "Service Tier":
 		return "默认 / default / priority / flex / fast"
 	case "Wire API":
-		return "responses（官方）或 chat（仅 Chat Completions 中转）"
+		return "responses（Codex 已移除 chat 支持）"
 	case "Max Tokens Field":
 		return "默认 / max_tokens / max_completion_tokens"
 	case "Supports Developer Role", "Supports Reasoning Effort", "Supports Usage In Streaming":
@@ -2027,8 +2052,6 @@ func providerBaseURLFallback(app ccswitch.AppType) string {
 	switch app {
 	case ccswitch.AppClaude, ccswitch.AppCodex:
 		return "官方登录"
-	case ccswitch.AppGemini:
-		return "Google OAuth"
 	case ccswitch.AppPi:
 		return "未设置 Base URL"
 	default:

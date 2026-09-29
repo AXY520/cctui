@@ -1,6 +1,6 @@
 # CC Switch TUI
 
-`CC Switch TUI` 是一个终端界面工具，用来管理并切换 `Claude`、`Codex`、`Gemini` 的多套供应商配置。
+`CC Switch TUI` 是一个终端界面工具，用来管理并切换 `Claude`、`Codex`、`Pi` 的多套供应商配置。
 
 它适合以下场景：
 
@@ -10,8 +10,8 @@
 
 ## 功能特性
 
-- 支持 `Claude`、`Codex`、`Gemini`、`Pi` 四类应用/Agent
-- 支持 **全局供应商**：一次添加，自动同步到 Claude/Codex/Gemini/Pi，再到各分组里切换启用
+- 支持 `Claude`、`Codex`、`Pi` 三类应用/Agent
+- 支持 **全局供应商**：一次添加，自动同步到 Claude/Codex/Pi，再到各分组里切换启用
 - 使用 SQLite 保存供应商配置，数据默认位于 `~/.cc-switch/`
 - 首次启动时，如果某个应用还没有保存的供应商，会尝试导入当前 live 配置
 - 切换前会先读取当前 live 配置并回写数据库，尽量保留你在外部手动改过的内容
@@ -26,8 +26,6 @@
 - `Claude` 兼容旧文件：`~/.claude/claude.json`
 - `Codex`：`~/.codex/auth.json`
 - `Codex`：`~/.codex/config.toml`
-- `Gemini`：`~/.gemini/.env`
-- `Gemini`：`~/.gemini/settings.json`
 - `Pi`：`~/.pi/agent/models.json`
 - `Pi`：`~/.pi/agent/auth.json`
 - `Pi`：`~/.pi/agent/settings.json`
@@ -116,19 +114,24 @@ cctui help                # 帮助
 - `d`：删除供应商
 - `u`：检查更新；发现新版本后可确认自动下载并替换
 - `t`：对当前供应商测速
-- `0/1/2/3/4`：跳到 全局 / Claude / Codex / Gemini / Pi
+- `0/1/2/3`：跳到 全局 / Claude / Codex / Pi
 
 表单里多项枚举字段（Reasoning Effort/Summary、Verbosity、Service Tier、Wire API、API Type、Reasoning、compat 开关等）支持 **Enter 弹出选项** 或 **←/→ 切换**。
+
+模型/选项弹窗内：
+
 - `↑/↓` 或 `j/k`：移动光标
+- `/`：进入模糊过滤（子串优先，支持乱序子序列匹配，如 `g54` 命中 `gpt-5.4`），再按 `Esc` 退出过滤
+- `Enter`：确认选择；`Esc`：关闭弹窗
 
 ### 全局供应商
 
-列表顶部是 **全局** 分组。在这里新增供应商后，会自动在 Claude、Codex、Gemini、Pi 中各创建一份同名配置，但不会自动切换 live。
+列表顶部是 **全局** 分组。在这里新增供应商后，会自动在 Claude、Codex、Pi 中各创建一份同名配置，但不会自动切换 live。
 
 你再到对应 CLI 分组里选中那份配置，按 `Enter` 才会写到本地配置文件并生效。
 
 编辑全局供应商会同步更新各 CLI/Agent 中的关联副本；删除全局供应商会尽量删除这些副本（若某 CLI 正在使用且还有其他供应商，则该副本会保留）。
-- `1/2/3`：快速跳转到 `Claude` / `Codex` / `Gemini`
+- `0/1/2/3`：快速跳转到 全局 / `Claude` / `Codex` / `Pi`
 - `g/G`：跳到顶部 / 底部
 - `Esc`：退出
 
@@ -153,7 +156,7 @@ cctui help                # 帮助
 `Claude` 扩展字段：
 
 - `Reasoning Model`：写入 `ANTHROPIC_REASONING_MODEL`
-- `Haiku/Fast Model`：写入 `ANTHROPIC_DEFAULT_HAIKU_MODEL` 与 `ANTHROPIC_SMALL_FAST_MODEL`；留空则与主 Model 相同
+- `Haiku/Fast Model`：写入 `ANTHROPIC_DEFAULT_HAIKU_MODEL`；留空则与主 Model 相同
 
 `Codex` 扩展字段：
 
@@ -161,7 +164,7 @@ cctui help                # 帮助
 - `Reasoning Summary`：`auto / concise / detailed / none`
 - `Verbosity`：`low / medium / high`
 - `Service Tier`：`default / priority / flex / fast`
-- `Wire API`：`responses`（官方默认）或 `chat`（仅支持 Chat Completions 的中转）
+- `Wire API`：仅 `responses`（Codex 已于 2026-02 移除 `chat` 支持，历史配置会自动升级为 `responses`）
 - `Context Window`：`model_context_window`
 
 `Pi` 扩展字段：
@@ -191,8 +194,7 @@ cctui help                # 帮助
 ```json
 {
   "claudeConfigDir": "/path/to/.claude",
-  "codexConfigDir": "/path/to/.codex",
-  "geminiConfigDir": "/path/to/.gemini"
+  "codexConfigDir": "/path/to/.codex"
 }
 ```
 

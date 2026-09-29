@@ -51,8 +51,8 @@ func TestClaudeReasoningAndHaikuModels(t *testing.T) {
 	if env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] != "deepseek-flash" {
 		t.Fatalf("haiku=%v", env["ANTHROPIC_DEFAULT_HAIKU_MODEL"])
 	}
-	if env["ANTHROPIC_SMALL_FAST_MODEL"] != "deepseek-flash" {
-		t.Fatalf("small=%v", env["ANTHROPIC_SMALL_FAST_MODEL"])
+	if _, ok := env["ANTHROPIC_SMALL_FAST_MODEL"]; ok {
+		t.Fatal("ANTHROPIC_SMALL_FAST_MODEL 已废弃，不应再写入")
 	}
 	if env["ANTHROPIC_REASONING_MODEL"] != "gpt-5.4" {
 		t.Fatalf("reasoning=%v", env["ANTHROPIC_REASONING_MODEL"])
@@ -64,7 +64,7 @@ func TestClaudeReasoningAndHaikuModels(t *testing.T) {
 	}
 }
 
-func TestCodexExtendedFieldsAndWireAPIChat(t *testing.T) {
+func TestCodexExtendedFieldsAndLegacyWireAPI(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("CC_SWITCH_TEST_HOME", home)
 	store, err := OpenStore()
@@ -73,6 +73,8 @@ func TestCodexExtendedFieldsAndWireAPIChat(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 
+	// WireAPI 填 chat 模拟历史存量供应商：Codex 已移除 chat 支持，
+	// 写入时必须统一升级为 responses，否则新版 Codex 拒绝启动。
 	created, _, err := store.AddProvider(AppCodex, ProviderInput{
 		Name:             "Chat Gateway",
 		BaseURL:          "https://chat.example.com/v1",
@@ -104,7 +106,7 @@ func TestCodexExtendedFieldsAndWireAPIChat(t *testing.T) {
 		`model_verbosity = 'medium'`,
 		`service_tier = 'flex'`,
 		`model_context_window = 200000`,
-		`wire_api = 'chat'`,
+		`wire_api = 'responses'`,
 		`base_url = 'https://chat.example.com/v1'`,
 	} {
 		if !strings.Contains(text, want) {
@@ -113,7 +115,7 @@ func TestCodexExtendedFieldsAndWireAPIChat(t *testing.T) {
 	}
 
 	got := store.ExtractInput(AppCodex, *created)
-	if got.WireAPI != "chat" {
+	if got.WireAPI != "responses" {
 		t.Fatalf("wire=%q", got.WireAPI)
 	}
 	if got.ContextWindow != 200000 || got.ModelVerbosity != "medium" || got.ServiceTier != "flex" {
@@ -190,17 +192,5 @@ func TestPiMaxTokensReasoningAndCompat(t *testing.T) {
 	}
 	if got.SupportsDeveloperRole != "false" || got.SupportsUsageInStreaming != "true" {
 		t.Fatalf("compat extract=%+v", got)
-	}
-}
-
-func TestNormalizeCodexWireAPI(t *testing.T) {
-	if normalizeCodexWireAPI("") != "responses" {
-		t.Fatal("default")
-	}
-	if normalizeCodexWireAPI("chat") != "chat" {
-		t.Fatal("chat")
-	}
-	if normalizeCodexWireAPI("openai-completions") != "chat" {
-		t.Fatal("alias")
 	}
 }

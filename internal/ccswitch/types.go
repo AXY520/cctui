@@ -2,7 +2,6 @@ package ccswitch
 
 import (
 	"encoding/json"
-	"strings"
 )
 
 type AppType string
@@ -11,15 +10,14 @@ const (
 	AppGlobal AppType = "global"
 	AppClaude AppType = "claude"
 	AppCodex  AppType = "codex"
-	AppGemini AppType = "gemini"
 	AppPi     AppType = "pi"
 )
 
 // AllAppTypes 是会读写 live 配置的应用。
-var AllAppTypes = []AppType{AppClaude, AppCodex, AppGemini, AppPi}
+var AllAppTypes = []AppType{AppClaude, AppCodex, AppPi}
 
 // UIAppTypes 是 TUI 列表展示顺序，全局供应商置顶。
-var UIAppTypes = []AppType{AppGlobal, AppClaude, AppCodex, AppGemini, AppPi}
+var UIAppTypes = []AppType{AppGlobal, AppClaude, AppCodex, AppPi}
 
 func (a AppType) String() string {
 	return string(a)
@@ -33,19 +31,17 @@ func (a AppType) DisplayName() string {
 		return "Claude"
 	case AppCodex:
 		return "Codex"
-	case AppGemini:
-		return "Gemini"
 	case AppPi:
 		return "Pi"
 	default:
-		return strings.Title(string(a))
+		return string(a)
 	}
 }
 
 // IsLiveApp 表示该类型会读写本地 CLI live 配置。
 func (a AppType) IsLiveApp() bool {
 	switch a {
-	case AppClaude, AppCodex, AppGemini, AppPi:
+	case AppClaude, AppCodex, AppPi:
 		return true
 	default:
 		return false
@@ -84,14 +80,14 @@ type ProviderInput struct {
 
 	// Claude
 	ReasoningModel string // ANTHROPIC_REASONING_MODEL
-	HaikuModel     string // ANTHROPIC_DEFAULT_HAIKU_MODEL / SMALL_FAST；空则跟 Model
+	HaikuModel     string // ANTHROPIC_DEFAULT_HAIKU_MODEL（SMALL_FAST 已废弃仅作读取兜底）；空则跟 Model
 
 	// Codex
 	ReasoningEffort  string // model_reasoning_effort
 	ReasoningSummary string // model_reasoning_summary
 	ModelVerbosity   string // model_verbosity
 	ServiceTier      string // service_tier
-	WireAPI          string // model_providers.*.wire_api: responses|chat
+	WireAPI          string // model_providers.*.wire_api；Codex 已移除 chat，仅支持 responses
 
 	// Pi
 	APIType                  string // openai-completions / openai-responses / anthropic-messages / google-generative-ai

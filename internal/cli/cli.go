@@ -54,7 +54,7 @@ func Run(version string, args []string) bool {
 }
 
 func printHelp(version string) {
-	fmt.Printf(`cctui %s — Claude / Codex / Gemini / Pi 供应商切换工具
+	fmt.Printf(`cctui %s — Claude / Codex / Pi 供应商切换工具
 
 用法:
   cctui                      启动 TUI
