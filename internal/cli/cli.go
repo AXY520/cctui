@@ -136,17 +136,23 @@ func runUpdate(version string, args []string) error {
 
 	fmt.Printf("正在下载并安装 v%s ...\n", info.Latest)
 	lastPct := -1
+	lastMB := int64(-1)
 	path, err := update.ApplyWithProgress(info, func(done, total int64) {
-		if total <= 0 {
+		if total > 0 {
+			pct := int(float64(done) / float64(total) * 100)
+			if pct != lastPct {
+				lastPct = pct
+				fmt.Printf("\r下载进度: %3d%% (%.1f/%.1f MB)", pct, float64(done)/1048576, float64(total)/1048576)
+			}
 			return
 		}
-		pct := int(float64(done) / float64(total) * 100)
-		if pct != lastPct {
-			lastPct = pct
-			fmt.Printf("\r下载进度: %3d%% (%.1f/%.1f MB)", pct, float64(done)/1048576, float64(total)/1048576)
+		// Gitee CDN 末段无 Content-Length，退化为字节数进度
+		if mb := done / 1048576; mb != lastMB {
+			lastMB = mb
+			fmt.Printf("\r已下载: %.1f MB", float64(done)/1048576)
 		}
 	})
-	if lastPct >= 0 {
+	if lastPct >= 0 || lastMB >= 0 {
 		fmt.Println()
 	}
 	if err != nil {
